@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------------------
+# Runtime data — NEVER commit. The SQLite DB can contain real client scan data,
+# notes, and the agent auth token; EyeWitness output holds screenshots.
+# ---------------------------------------------------------------------------
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# JSON backups / exports may contain client data
+nmap-viewer-backup-*.json
+
+# Python virtual environment
+venv/
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Secrets / environment
+.env
+.env.*
+*.token
+
+# Agent local state (normally in $HOME, but just in case)
+.nmap-viewer-agent-id
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

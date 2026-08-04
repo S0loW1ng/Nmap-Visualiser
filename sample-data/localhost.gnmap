@@ -1,0 +1,4 @@
+# Nmap 7.94SVN scan initiated Sun Aug  2 14:21:45 2026 as: nmap -sV -T4 -oX sample-data/localhost.xml -oG sample-data/localhost.gnmap 127.0.0.1
+Host: 127.0.0.1 (localhost)	Status: Up
+Host: 127.0.0.1 (localhost)	Ports: 22/open/tcp//ssh//OpenSSH 9.6p1 Ubuntu 3ubuntu13.16 (Ubuntu Linux; protocol 2.0)/, 111/open/tcp//rpcbind//2-4 (RPC #100000)/, 631/open/tcp//ipp//CUPS 2.4/, 902/open/tcp//ssl|vmware-auth//VMware Authentication Daemon 1.10 (Uses VNC, SOAP)/, 3000/open/tcp//ppp?///	Ignored State: closed (995)
+# Nmap done at Sun Aug  2 14:21:57 2026 -- 1 IP address (1 host up) scanned in 11.94 seconds

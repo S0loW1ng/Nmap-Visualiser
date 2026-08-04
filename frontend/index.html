@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nmap-viewer</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Sidebar -->
+  <aside id="sidebar">
+    <div class="brand">
+      <span class="logo">◎</span>
+      <span>nmap-viewer</span>
+    </div>
+
+    <div class="sidebar-actions">
+      <!-- Import menu -->
+      <div class="menu">
+        <button class="btn btn-primary menu-toggle">＋ Import <span class="caret">▾</span></button>
+        <div class="menu-list" hidden>
+          <label class="menu-item" for="fileInput">Scan file(s) — .xml / .gnmap</label>
+          <label class="menu-item" for="importMergeInput">Files → merge into one scan</label>
+          <button class="menu-item" id="importMdBtn">Markdown table</button>
+        </div>
+      </div>
+      <input id="fileInput" type="file" accept=".xml,.gnmap" hidden multiple>
+      <input id="importMergeInput" type="file" accept=".xml,.gnmap" hidden multiple>
+
+      <button class="btn" id="mergeAllBtn" disabled>⧉ Merge all</button>
+      <button class="btn" id="agentsBtn">⛓ Agents <span id="agentsBadge" class="agents-badge" hidden></span></button>
+    </div>
+
+    <div class="sidebar-label">
+      <label class="selall"><input type="checkbox" id="selectAll"> <span>Scans</span></label>
+      <span id="selectHint" class="select-hint"></span>
+    </div>
+
+    <div id="selectionBar" class="selection-bar" hidden>
+      <span id="selCount" class="sel-count"></span>
+      <span class="sel-actions">
+        <button class="btn btn-sm" id="mergeBtn" disabled title="Merge selected (need 2+)">⧉ Merge</button>
+        <button class="btn btn-sm btn-danger" id="deleteSelBtn">🗑 Delete</button>
+        <button class="btn btn-sm" id="clearSelBtn" title="Clear selection">✕</button>
+      </span>
+    </div>
+
+    <ul id="scanList" class="scan-list"></ul>
+
+    <div id="jobsPanel" class="jobs-panel" hidden>
+      <div class="sidebar-label">
+        <span>Scan jobs</span>
+        <span id="jobsHint" class="select-hint"></span>
+      </div>
+      <ul id="jobsList" class="jobs-list"></ul>
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="menu menu-up" style="flex:1">
+        <button class="btn btn-sm menu-toggle" style="width:100%">⚙ Data <span class="caret">▾</span></button>
+        <div class="menu-list" hidden>
+          <button class="menu-item" id="backupBtn">⤓ Backup — download JSON</button>
+          <label class="menu-item" for="restoreInput">⤴ Restore — upload JSON</label>
+          <button class="menu-item danger" id="clearAllBtn">🗑 Clear database</button>
+        </div>
+      </div>
+      <input id="restoreInput" type="file" accept=".json,application/json" hidden>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main id="main">
+    <div id="emptyState" class="empty">
+      <div class="empty-inner">
+        <div class="empty-logo">◎</div>
+        <h1>nmap-viewer</h1>
+        <p>Import an nmap <code>.xml</code> or <code>.gnmap</code> file to get started,
+           or bring in a markdown table someone exported.</p>
+        <div class="empty-actions">
+          <label class="btn btn-primary" for="fileInput2">＋ Import scan</label>
+          <input id="fileInput2" type="file" accept=".xml,.gnmap" hidden multiple>
+          <button class="btn" id="importMdBtn2">⇤ Import MD table</button>
+        </div>
+      </div>
+    </div>
+
+    <section id="scanView" hidden>
+      <!-- Scan header -->
+      <header class="scan-header">
+        <div class="scan-title-row">
+          <h1 id="scanName" class="scan-name" title="Click to rename"></h1>
+          <button class="btn btn-sm" id="renameBtn" title="Rename this scan">✎</button>
+          <span id="scanSource" class="badge"></span>
+          <div class="spacer"></div>
+          <div class="export-group">
+            <button class="btn" id="eyewitnessBtn" title="Screenshot this scan's web services with EyeWitness">📷 EyeWitness</button>
+            <button class="btn" id="exportTableBtn">⤓ Table.md</button>
+            <button class="btn" id="exportReportBtn">⤓ Report.md</button>
+            <button class="btn btn-danger" id="deleteScanBtn">🗑 Delete</button>
+          </div>
+        </div>
+        <div id="scanMeta" class="scan-meta"></div>
+      </header>
+
+      <!-- Scan notes -->
+      <details class="notes-block" open>
+        <summary>Scan notes</summary>
+        <textarea id="scanNotes" class="notes" placeholder="Notes about this scan…"></textarea>
+        <span class="save-hint" id="scanNotesHint"></span>
+      </details>
+
+      <!-- EyeWitness screenshots -->
+      <details id="shotsBlock" class="notes-block" hidden>
+        <summary>
+          Screenshots <span id="shotsCount" class="select-hint"></span>
+          <span id="shotsStatus" class="ew-status"></span>
+        </summary>
+        <div id="shotsGallery" class="gallery"></div>
+      </details>
+
+      <!-- Host table + detail split -->
+      <div class="split">
+        <div class="hosts-pane">
+          <div class="pane-toolbar">
+            <input id="hostFilter" class="filter" placeholder="Filter hosts / services / ports…">
+            <label class="chk"><input type="checkbox" id="openOnly"> open ports only</label>
+          </div>
+          <div class="table-wrap">
+            <table id="hostTable" class="host-table">
+              <thead>
+                <tr>
+                  <th data-sort="checked" class="chk-col" title="Checked / reviewed">✓</th>
+                  <th data-sort="ip">IP ▲</th>
+                  <th data-sort="hostname">Hostname</th>
+                  <th data-sort="state">State</th>
+                  <th data-sort="open" class="num">Open</th>
+                  <th data-sort="os">OS</th>
+                </tr>
+              </thead>
+              <tbody id="hostTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <aside id="hostDetail" class="host-detail">
+          <div class="host-detail-empty">Select a host to see its ports and notes.</div>
+        </aside>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- Import markdown modal -->
+<div id="mdModal" class="modal" hidden>
+  <div class="modal-card">
+    <h2>Import markdown table</h2>
+    <p class="muted">Paste a table exported from nmap-viewer (or any table with a
+       Host/IP column). It will be added as a new scan.</p>
+    <input id="mdName" class="filter" placeholder="Name for this import" value="Imported table">
+    <textarea id="mdText" class="notes tall" placeholder="| Host | Port | Service | … |"></textarea>
+    <div class="modal-actions">
+      <button class="btn" id="mdCancel">Cancel</button>
+      <button class="btn btn-primary" id="mdSubmit">Import</button>
+    </div>
+  </div>
+</div>
+
+<!-- Scan job (live output) modal -->
+<div id="jobModal" class="modal" hidden>
+  <div class="modal-card wide">
+    <div class="job-head">
+      <h2 id="jobTitle">Scan job</h2>
+      <span id="jobStatus" class="ew-status"></span>
+    </div>
+    <pre id="jobOutput" class="job-output"></pre>
+    <div class="modal-actions">
+      <button class="btn btn-danger" id="jobStop">■ Stop</button>
+      <button class="btn btn-primary" id="jobOpenResult" hidden>Open result scan →</button>
+      <button class="btn" id="jobClose">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Agents modal -->
+<div id="agentsModal" class="modal" hidden>
+  <div class="modal-card wide">
+    <h2>Agents</h2>
+    <p class="muted">Run scans from another machine. Download the agent, run it on a
+      host that can reach your targets, and it connects back here over WebSocket —
+      then it shows up as a scan source you can pick when launching a scan.</p>
+    <div class="agent-token-row">
+      <label>Token</label>
+      <input id="agentTokenField" class="filter" readonly>
+      <button class="btn btn-sm" id="copyTokenBtn">⧉ Copy</button>
+      <a class="btn btn-sm btn-primary" id="downloadAgentBtn" href="/api/agents/script" download>⤓ Download agent</a>
+    </div>
+    <div class="agent-run-hint">On the other machine:
+      <code>pip install websockets &amp;&amp; python3 nmap_viewer_agent.py</code>
+    </div>
+    <div class="sidebar-label" style="margin-top:12px"><span>Registered agents</span></div>
+    <div id="agentsList" class="agents-list"></div>
+    <div class="modal-actions"><button class="btn" id="agentsClose">Close</button></div>
+  </div>
+</div>
+
+<!-- Screenshot lightbox -->
+<div id="lightbox" class="lightbox" hidden>
+  <div class="lightbox-bar">
+    <span id="lightboxLabel"></span>
+    <button class="btn btn-sm" id="lightboxClose">✕ Close</button>
+  </div>
+  <img id="lightboxImg" alt="screenshot">
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
