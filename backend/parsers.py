@@ -124,8 +124,20 @@ def parse_xml(data: bytes | str) -> dict:
                     os_accuracy = None
 
         ports = []
+        extraports = []
         ports_el = host_el.find("ports")
         if ports_el is not None:
+            for ep in ports_el.findall("extraports"):
+                try:
+                    cnt = int(ep.get("count", "0") or "0")
+                except ValueError:
+                    cnt = 0
+                reasons = [er.get("reason", "") for er in ep.findall("extrareasons")]
+                extraports.append({
+                    "state": ep.get("state", ""),
+                    "count": cnt,
+                    "reason": ", ".join(r for r in reasons if r),
+                })
             for port_el in ports_el.findall("port"):
                 port_state_el = port_el.find("state")
                 port_state = port_state_el.get("state", "") if port_state_el is not None else ""
@@ -169,6 +181,129 @@ def parse_xml(data: bytes | str) -> dict:
             "os_name": os_name,
             "os_accuracy": os_accuracy,
             "ports": ports,
+            "extraports": extraports,
+        })
+
+    return scan
+
+
+# ---------------------------------------------------------------------------
+# Nessus (.nessus / NessusClientData_v2)
+# ---------------------------------------------------------------------------
+
+# Nessus severity levels -> label (kept here so the parser is the one source).
+NESSUS_SEVERITY = {0: "Info", 1: "Low", 2: "Medium", 3: "High", 4: "Critical"}
+
+
+def _nessus_text(item: "ET.Element", tag: str) -> str:
+    el = item.find(tag)
+    return (el.text or "").strip() if el is not None and el.text else ""
+
+
+def parse_nessus(data: bytes | str) -> dict:
+    """
+    Parse a Nessus export (.nessus, NessusClientData_v2).
+
+    Each <ReportHost> becomes a host in the same shape the nmap parsers produce,
+    keyed by IP so it can be merged by IP alongside nmap scans. Every finding
+    (<ReportItem>) is captured under host["findings"]; ports that carry findings
+    are synthesised as open ports so the host table stays meaningful.
+    """
+    if isinstance(data, str):
+        data = data.encode("utf-8", errors="replace")
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as exc:
+        raise ValueError(f"Could not parse Nessus XML: {exc}")
+    if root.tag != "NessusClientData_v2":
+        raise ValueError("Not a Nessus file (missing <NessusClientData_v2> root).")
+
+    report = root.find("Report")
+    scan = {
+        "args": report.get("name", "") if report is not None else "",
+        "scanner_version": "",
+        "started_at": None,
+        "source_type": "nessus",
+        "hosts": [],
+    }
+    if report is None:
+        return scan
+
+    for rh in report.findall("ReportHost"):
+        props: dict[str, str] = {}
+        hp = rh.find("HostProperties")
+        if hp is not None:
+            for tag in hp.findall("tag"):
+                props[tag.get("name", "")] = (tag.text or "").strip()
+
+        ip = props.get("host-ip") or rh.get("name", "")
+        hostname = (props.get("host-fqdn") or props.get("host-rdns")
+                    or props.get("netbios-name") or "")
+        if not hostname and rh.get("name") and rh.get("name") != ip:
+            hostname = rh.get("name")
+        os_name = props.get("operating-system", "")
+        if scan["started_at"] is None and props.get("HOST_START_TIMESTAMP"):
+            scan["started_at"] = _epoch_to_iso(props.get("HOST_START_TIMESTAMP"))
+
+        findings = []
+        ports_map: "dict[tuple[str, int], str]" = {}
+        for ri in rh.findall("ReportItem"):
+            try:
+                severity = int(ri.get("severity", "0") or 0)
+            except ValueError:
+                severity = 0
+            try:
+                portid = int(ri.get("port", "0") or 0)
+            except ValueError:
+                portid = 0
+            protocol = ri.get("protocol", "") or "tcp"
+            svc = ri.get("svc_name", "") or ""
+
+            cves = [(e.text or "").strip() for e in ri.findall("cve") if (e.text or "").strip()]
+            cvss = _nessus_text(ri, "cvss3_base_score") or _nessus_text(ri, "cvss_base_score")
+
+            findings.append({
+                "plugin_id": ri.get("pluginID", ""),
+                "name": ri.get("pluginName", ""),
+                "family": ri.get("pluginFamily", ""),
+                "severity": severity,
+                "port": portid,
+                "protocol": protocol,
+                "service": svc,
+                "risk_factor": _nessus_text(ri, "risk_factor"),
+                "cvss": cvss,
+                "cve": cves,
+                "synopsis": _nessus_text(ri, "synopsis"),
+                "description": _nessus_text(ri, "description"),
+                "solution": _nessus_text(ri, "solution"),
+                "output": _nessus_text(ri, "plugin_output"),
+            })
+
+            if portid > 0:
+                key = (protocol, portid)
+                svc_clean = svc if svc and svc not in ("general", "unknown") else ""
+                if key not in ports_map or (not ports_map[key] and svc_clean):
+                    ports_map[key] = svc_clean
+
+        ports = [{
+            "portid": portid,
+            "protocol": proto,
+            "state": "open",
+            "service": svc,
+            "product": "", "version": "", "extrainfo": "", "tunnel": "",
+            "scripts": [],
+        } for (proto, portid), svc in sorted(ports_map.items())]
+
+        findings.sort(key=lambda f: (-f["severity"], f["name"].lower()))
+        scan["hosts"].append({
+            "ip": ip,
+            "hostname": hostname,
+            "state": "up",
+            "os_name": os_name,
+            "os_accuracy": None,
+            "ports": ports,
+            "extraports": [],
+            "findings": findings,
         })
 
     return scan
@@ -232,6 +367,7 @@ def parse_gnmap(data: bytes | str) -> dict:
                 "os_name": "",
                 "os_accuracy": None,
                 "ports": [],
+                "extraports": [],
             }
         elif hostname and not hosts[ip]["hostname"]:
             hosts[ip]["hostname"] = hostname
@@ -262,7 +398,10 @@ def parse_gnmap(data: bytes | str) -> dict:
             status = rest.split("Status:", 1)[1].strip().split()[0]
             host["state"] = status.lower()
         if "Ports:" in rest:
-            # Ports: 22/open/tcp//ssh//..., 111/open/tcp//rpcbind//...  Ignored State: ...
+            # Ports: 22/open/tcp//ssh//..., 111/open/tcp//rpcbind//...  Ignored State: closed (995)
+            ign = re.search(r"Ignored State:\s*(\w+)\s*\((\d+)\)", rest)
+            if ign:
+                host["extraports"] = [{"state": ign.group(1), "count": int(ign.group(2)), "reason": ""}]
             ports_part = rest.split("Ports:", 1)[1]
             ports_part = re.split(r"\bIgnored State:", ports_part)[0]
             for field in ports_part.split(","):
@@ -293,6 +432,8 @@ def parse_auto(data: bytes | str, filename: str = "") -> dict:
         head = data[:512].lstrip().encode()
 
     name = filename.lower()
+    if name.endswith(".nessus") or b"NessusClientData" in head:
+        return parse_nessus(data)
     if name.endswith(".xml") or head.startswith(b"<?xml") or head.startswith(b"<nmaprun"):
         return parse_xml(data)
     if name.endswith(".gnmap") or head.startswith(b"# Nmap") or head.startswith(b"Host:"):

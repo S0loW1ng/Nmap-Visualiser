@@ -22,12 +22,14 @@
         <button class="btn btn-primary menu-toggle">＋ Import <span class="caret">▾</span></button>
         <div class="menu-list" hidden>
           <label class="menu-item" for="fileInput">Scan file(s) — .xml / .gnmap</label>
+          <label class="menu-item" for="nessusInput">Nessus file(s) — .nessus</label>
           <label class="menu-item" for="importMergeInput">Files → merge into one scan</label>
           <button class="menu-item" id="importMdBtn">Markdown table</button>
         </div>
       </div>
-      <input id="fileInput" type="file" accept=".xml,.gnmap" hidden multiple>
-      <input id="importMergeInput" type="file" accept=".xml,.gnmap" hidden multiple>
+      <input id="fileInput" type="file" accept=".xml,.gnmap,.nessus" hidden multiple>
+      <input id="nessusInput" type="file" accept=".nessus" hidden multiple>
+      <input id="importMergeInput" type="file" accept=".xml,.gnmap,.nessus" hidden multiple>
 
       <button class="btn" id="mergeAllBtn" disabled>⧉ Merge all</button>
       <button class="btn" id="agentsBtn">⛓ Agents <span id="agentsBadge" class="agents-badge" hidden></span></button>
@@ -35,19 +37,24 @@
 
     <div class="sidebar-label">
       <label class="selall"><input type="checkbox" id="selectAll"> <span>Scans</span></label>
+      <button class="icon-btn" id="newFolderBtn" title="New folder">📁＋</button>
       <span id="selectHint" class="select-hint"></span>
     </div>
 
     <div id="selectionBar" class="selection-bar" hidden>
       <span id="selCount" class="sel-count"></span>
       <span class="sel-actions">
+        <div class="menu">
+          <button class="btn btn-sm menu-toggle" id="moveBtn" title="Move selected to a folder">📁 Move ▾</button>
+          <div class="menu-list" hidden id="moveMenu"></div>
+        </div>
         <button class="btn btn-sm" id="mergeBtn" disabled title="Merge selected (need 2+)">⧉ Merge</button>
         <button class="btn btn-sm btn-danger" id="deleteSelBtn">🗑 Delete</button>
         <button class="btn btn-sm" id="clearSelBtn" title="Clear selection">✕</button>
       </span>
     </div>
 
-    <ul id="scanList" class="scan-list"></ul>
+    <div id="scanList" class="scan-list"></div>
 
     <div id="jobsPanel" class="jobs-panel" hidden>
       <div class="sidebar-label">
@@ -80,7 +87,7 @@
            or bring in a markdown table someone exported.</p>
         <div class="empty-actions">
           <label class="btn btn-primary" for="fileInput2">＋ Import scan</label>
-          <input id="fileInput2" type="file" accept=".xml,.gnmap" hidden multiple>
+          <input id="fileInput2" type="file" accept=".xml,.gnmap,.nessus" hidden multiple>
           <button class="btn" id="importMdBtn2">⇤ Import MD table</button>
         </div>
       </div>
@@ -125,17 +132,28 @@
         <div class="hosts-pane">
           <div class="pane-toolbar">
             <input id="hostFilter" class="filter" placeholder="Filter hosts / services / ports…">
-            <label class="chk"><input type="checkbox" id="openOnly"> open ports only</label>
+            <label class="chk"><input type="checkbox" id="flaggedOnly"> ⚑ flagged</label>
+          </div>
+          <div class="pane-toolbar port-state-bar">
+            <span class="ps-label">Show ports:</span>
+            <label class="chk"><input type="checkbox" id="stOpen" checked> open</label>
+            <label class="chk"><input type="checkbox" id="stFiltered" checked> filtered</label>
+            <label class="chk"><input type="checkbox" id="stOpenFiltered" checked> open|filtered</label>
+            <label class="chk"><input type="checkbox" id="stClosed" checked> closed</label>
           </div>
           <div class="table-wrap">
             <table id="hostTable" class="host-table">
               <thead>
                 <tr>
                   <th data-sort="checked" class="chk-col" title="Checked / reviewed">✓</th>
+                  <th data-sort="flagged" class="flag-col" title="Flag for later">⚑</th>
                   <th data-sort="ip">IP ▲</th>
                   <th data-sort="hostname">Hostname</th>
                   <th data-sort="state">State</th>
                   <th data-sort="open" class="num">Open</th>
+                  <th data-sort="closed" class="num">Closed</th>
+                  <th data-sort="filtered" class="num">Filtered</th>
+                  <th data-sort="openfiltered" class="num" title="open|filtered">Open|Filt</th>
                   <th data-sort="os">OS</th>
                 </tr>
               </thead>

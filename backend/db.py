@@ -21,6 +21,12 @@ from pathlib import Path
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "nmap_viewer.db"
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS folders (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS scans (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL,
@@ -29,7 +35,8 @@ CREATE TABLE IF NOT EXISTS scans (
     scanner_version TEXT DEFAULT '',
     started_at      TEXT,
     imported_at     TEXT NOT NULL,
-    notes           TEXT DEFAULT ''
+    notes           TEXT DEFAULT '',
+    folder_id       INTEGER REFERENCES folders(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS hosts (
@@ -41,7 +48,10 @@ CREATE TABLE IF NOT EXISTS hosts (
     os_name     TEXT DEFAULT '',
     os_accuracy INTEGER,
     notes       TEXT DEFAULT '',
-    checked     INTEGER NOT NULL DEFAULT 0
+    checked     INTEGER NOT NULL DEFAULT 0,
+    flagged     INTEGER NOT NULL DEFAULT 0,
+    extraports_json TEXT DEFAULT '[]',
+    findings_json   TEXT DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS ports (
@@ -130,12 +140,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(hosts)").fetchall()}
     if "checked" not in cols:
         conn.execute("ALTER TABLE hosts ADD COLUMN checked INTEGER NOT NULL DEFAULT 0")
+    if "flagged" not in cols:
+        conn.execute("ALTER TABLE hosts ADD COLUMN flagged INTEGER NOT NULL DEFAULT 0")
+    if "extraports_json" not in cols:
+        conn.execute("ALTER TABLE hosts ADD COLUMN extraports_json TEXT DEFAULT '[]'")
+    if "findings_json" not in cols:
+        conn.execute("ALTER TABLE hosts ADD COLUMN findings_json TEXT DEFAULT '[]'")
     pcols = {row[1] for row in conn.execute("PRAGMA table_info(ports)").fetchall()}
     if "notes" not in pcols:
         conn.execute("ALTER TABLE ports ADD COLUMN notes TEXT DEFAULT ''")
     jcols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
     if jcols and "parent_scan_id" not in jcols:
         conn.execute("ALTER TABLE jobs ADD COLUMN parent_scan_id INTEGER")
+    scols = {row[1] for row in conn.execute("PRAGMA table_info(scans)").fetchall()}
+    if "folder_id" not in scols:
+        conn.execute("ALTER TABLE scans ADD COLUMN folder_id INTEGER")
 
 
 # ---------------------------------------------------------------------------
@@ -164,8 +183,9 @@ def insert_scan(parsed: dict, name: str) -> int:
         for host in parsed.get("hosts", []):
             hcur = conn.execute(
                 """INSERT INTO hosts (scan_id, ip, hostname, state, os_name,
-                                      os_accuracy, notes, checked)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                                      os_accuracy, notes, checked, flagged,
+                                      extraports_json, findings_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     scan_id,
                     host.get("ip", ""),
@@ -175,6 +195,9 @@ def insert_scan(parsed: dict, name: str) -> int:
                     host.get("os_accuracy"),
                     host.get("notes", ""),
                     1 if host.get("checked") else 0,
+                    1 if host.get("flagged") else 0,
+                    json.dumps(host.get("extraports", [])),
+                    json.dumps(host.get("findings", [])),
                 ),
             )
             host_id = hcur.lastrowid
@@ -347,6 +370,14 @@ def update_host_checked(host_id: int, checked: bool) -> bool:
         return cur.rowcount > 0
 
 
+def update_host_flagged(host_id: int, flagged: bool) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE hosts SET flagged = ? WHERE id = ?", (1 if flagged else 0, host_id)
+        )
+        return cur.rowcount > 0
+
+
 def rename_scan(scan_id: int, name: str) -> bool:
     with get_conn() as conn:
         cur = conn.execute("UPDATE scans SET name = ? WHERE id = ?", (name, scan_id))
@@ -375,6 +406,62 @@ def delete_all_scans() -> int:
         conn.execute("DELETE FROM scans")   # cascades to hosts/ports/screenshots
         conn.execute("DELETE FROM jobs")    # jobs reference scans; clear for a clean slate
         return n
+
+
+# ---------------------------------------------------------------------------
+# Folders
+# ---------------------------------------------------------------------------
+
+def create_folder(name: str) -> dict:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO folders (name, created_at) VALUES (?, ?)", (name, _now())
+        )
+        fid = cur.lastrowid
+        row = conn.execute("SELECT * FROM folders WHERE id=?", (fid,)).fetchone()
+        return dict(row)
+
+
+def list_folders() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT f.*,
+                      (SELECT COUNT(*) FROM scans s WHERE s.folder_id = f.id) AS scan_count
+                 FROM folders f
+                ORDER BY LOWER(f.name)"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def rename_folder(folder_id: int, name: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE folders SET name=? WHERE id=?", (name, folder_id))
+        return cur.rowcount > 0
+
+
+def delete_folder(folder_id: int) -> bool:
+    """Delete a folder; its scans become unfiled (folder_id = NULL). Scans are kept."""
+    with get_conn() as conn:
+        conn.execute("UPDATE scans SET folder_id = NULL WHERE folder_id = ?", (folder_id,))
+        cur = conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+        return cur.rowcount > 0
+
+
+def move_scans_to_folder(ids: list[int], folder_id: int | None) -> int:
+    ids = [int(i) for i in ids]
+    if not ids:
+        return 0
+    if folder_id is not None:
+        with get_conn() as conn:
+            if not conn.execute("SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone():
+                raise ValueError("Folder not found.")
+    placeholders = ",".join("?" for _ in ids)
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"UPDATE scans SET folder_id = ? WHERE id IN ({placeholders})",
+            [folder_id] + ids,
+        )
+        return cur.rowcount
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +509,14 @@ def get_scan(scan_id: int) -> dict | None:
         ).fetchall()
         for hrow in hrows:
             host = dict(hrow)
+            try:
+                host["extraports"] = json.loads(host.pop("extraports_json", None) or "[]")
+            except json.JSONDecodeError:
+                host["extraports"] = []
+            try:
+                host["findings"] = json.loads(host.pop("findings_json", None) or "[]")
+            except json.JSONDecodeError:
+                host["findings"] = []
             host["ports"] = _ports_for_host(conn, host["id"])
             host["open_port_count"] = sum(1 for p in host["ports"] if p["state"] == "open")
             hosts.append(host)

@@ -66,6 +66,10 @@ class CheckedBody(BaseModel):
     checked: bool = False
 
 
+class FlaggedBody(BaseModel):
+    flagged: bool = False
+
+
 class RenameBody(BaseModel):
     name: str
 
@@ -73,6 +77,7 @@ class RenameBody(BaseModel):
 class MarkdownImportBody(BaseModel):
     name: str = "Imported table"
     text: str
+    folder_id: int | None = None
 
 
 class MergeBody(BaseModel):
@@ -91,12 +96,31 @@ class IdsBody(BaseModel):
     ids: list[int]
 
 
+class FolderBody(BaseModel):
+    name: str
+
+
+class MoveBody(BaseModel):
+    ids: list[int]
+    folder_id: int | None = None   # None = unfiled (no folder)
+
+
 # ---------------------------------------------------------------------------
 # Scans
 # ---------------------------------------------------------------------------
 
+def _assign_folder(scan_id: int, folder_id: int | None) -> None:
+    """Best-effort move of a freshly imported scan into a folder (ignore bad ids)."""
+    if folder_id is None:
+        return
+    try:
+        db.move_scans_to_folder([scan_id], folder_id)
+    except ValueError:
+        pass
+
+
 @app.post("/api/scans/import")
-async def import_scan(file: UploadFile = File(...)):
+async def import_scan(file: UploadFile = File(...), folder_id: int | None = Form(None)):
     raw = await file.read()
     if not raw.strip():
         raise HTTPException(400, "Uploaded file is empty.")
@@ -108,12 +132,14 @@ async def import_scan(file: UploadFile = File(...)):
         raise HTTPException(400, "Parsed file contained no hosts.")
     name = (file.filename or "scan").rsplit("/", 1)[-1]
     scan_id = db.insert_scan(parsed, name)
+    _assign_folder(scan_id, folder_id)
     return {"id": scan_id, "name": name, "source_type": parsed["source_type"],
             "host_count": len(parsed["hosts"])}
 
 
 @app.post("/api/scans/import-merge")
-async def import_merge(files: list[UploadFile] = File(...), name: str = Form("")):
+async def import_merge(files: list[UploadFile] = File(...), name: str = Form(""),
+                       folder_id: int | None = Form(None)):
     """Import several nmap files and merge them (by IP) into ONE new scan."""
     parsed_list = []
     skipped = []  # [{file, reason}]
@@ -144,12 +170,14 @@ async def import_merge(files: list[UploadFile] = File(...), name: str = Form("")
         p = parsed_list[0]
         final_name = name.strip() or p["name"]
         scan_id = db.insert_scan(p, final_name)
+        _assign_folder(scan_id, folder_id)
         return {"id": scan_id, "name": final_name, "host_count": len(p["hosts"]),
                 "merged_from": 1, "skipped": skipped}
 
     final_name = name.strip() or f"Merged import ({len(parsed_list)} files)"
     merged = merge.merge_scans(parsed_list, final_name)
     scan_id = db.insert_scan(merged, final_name)
+    _assign_folder(scan_id, folder_id)
     return {"id": scan_id, "name": final_name, "host_count": len(merged["hosts"]),
             "merged_from": len(parsed_list), "skipped": skipped}
 
@@ -163,6 +191,7 @@ def import_markdown(body: MarkdownImportBody):
     if not parsed.get("hosts"):
         raise HTTPException(400, "No host rows found in the table.")
     scan_id = db.insert_scan(parsed, body.name)
+    _assign_folder(scan_id, body.folder_id)
     return {"id": scan_id, "name": body.name, "host_count": len(parsed["hosts"])}
 
 
@@ -183,6 +212,49 @@ def merge_scans(body: MergeBody):
         raise HTTPException(400, "The selected scans contain no hosts to merge.")
     new_id = db.insert_scan(parsed, name)
     return {"id": new_id, "name": name, "host_count": len(parsed["hosts"])}
+
+
+# ---------------------------------------------------------------------------
+# Folders (organise scans)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/folders")
+def list_folders():
+    return db.list_folders()
+
+
+@app.post("/api/folders")
+def create_folder(body: FolderBody):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Folder name cannot be empty.")
+    return db.create_folder(name)
+
+
+@app.patch("/api/folders/{folder_id}")
+def rename_folder(folder_id: int, body: FolderBody):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Folder name cannot be empty.")
+    if not db.rename_folder(folder_id, name):
+        raise HTTPException(404, "Folder not found.")
+    return {"ok": True}
+
+
+@app.delete("/api/folders/{folder_id}")
+def delete_folder(folder_id: int):
+    if not db.delete_folder(folder_id):
+        raise HTTPException(404, "Folder not found.")
+    return {"ok": True}
+
+
+@app.post("/api/scans/move")
+def move_scans(body: MoveBody):
+    try:
+        n = db.move_scans_to_folder(body.ids, body.folder_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    return {"moved": n}
 
 
 @app.get("/api/scans")
@@ -245,6 +317,13 @@ def set_host_notes(host_id: int, body: NotesBody):
 @app.put("/api/hosts/{host_id}/checked")
 def set_host_checked(host_id: int, body: CheckedBody):
     if not db.update_host_checked(host_id, body.checked):
+        raise HTTPException(404, "Host not found.")
+    return {"ok": True}
+
+
+@app.put("/api/hosts/{host_id}/flagged")
+def set_host_flagged(host_id: int, body: FlaggedBody):
+    if not db.update_host_flagged(host_id, body.flagged):
         raise HTTPException(404, "Host not found.")
     return {"ok": True}
 

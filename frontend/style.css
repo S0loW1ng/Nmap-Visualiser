@@ -132,12 +132,15 @@ code { font-family: var(--mono); font-size: 0.92em; color: #cbd5e1; }
 
 /* selection bar */
 .selection-bar {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px;
   background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
   padding: 6px 8px; margin-bottom: 8px;
 }
-.sel-count { color: var(--accent); font-size: 12px; font-weight: 600; white-space: nowrap; }
-.sel-actions { display: flex; gap: 6px; }
+/* Count on its own line, buttons wrap freely below so nothing runs off the
+   sidebar's right edge. */
+.sel-count { color: var(--accent); font-size: 12px; font-weight: 600; white-space: nowrap;
+  flex: 1 1 100%; }
+.sel-actions { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 100%; }
 #mergeBtn:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ---------------- Main ---------------- */
@@ -216,12 +219,28 @@ table { width: 100%; border-collapse: collapse; }
 .host-table tbody tr.checked:hover { opacity: 0.8; }
 .host-table tbody tr.checked .ip { text-decoration: line-through; }
 
+/* flag-for-later */
+.host-table .flag-col { width: 26px; text-align: center; padding-left: 4px; padding-right: 4px; }
+.flag-btn { background: none; border: 0; cursor: pointer; font-size: 14px; line-height: 1;
+  color: var(--muted); padding: 2px; border-radius: 4px; }
+.flag-btn:hover { background: var(--bg-3); color: var(--amber); }
+.flag-btn.on { color: var(--amber); }
+.host-table tbody tr.flagged { box-shadow: inset 3px 0 0 var(--amber); }
+.host-table tbody tr.flagged.checked { opacity: .7; }
+
+/* port-state toggle bar */
+.port-state-bar { margin-top: -2px; gap: 12px; }
+.ps-label { color: var(--muted); font-size: 12px; }
+
 .state-up { color: var(--green); }
 .state-down { color: var(--red); }
 .pill { display: inline-block; min-width: 22px; text-align: center; padding: 1px 7px;
   border-radius: 20px; font-size: 12px; font-weight: 600; }
 .pill-open { background: rgba(63,178,127,.16); color: var(--green); }
 .pill-zero { background: var(--bg-3); color: var(--muted); }
+.pill-closed { background: rgba(224,91,91,.14); color: var(--red); }
+.pill-filtered { background: rgba(224,166,59,.16); color: var(--amber); }
+.pill-openfiltered { background: rgba(76,139,245,.16); color: var(--accent); }
 
 /* ---------------- Host detail ---------------- */
 .host-detail { border: 1px solid var(--line); border-radius: var(--radius);
@@ -241,6 +260,10 @@ table { width: 100%; border-collapse: collapse; }
 .script-id { color: var(--amber); font-family: var(--mono); font-size: 12px; }
 .script pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
   padding: 8px; overflow-x: auto; font-size: 12px; margin: 4px 0 0; white-space: pre-wrap; }
+.extraports-row { padding: 7px 11px; margin-bottom: 8px; border: 1px dashed var(--line);
+  border-radius: 8px; color: var(--muted); font-size: 13px; background: var(--bg); }
+.extraports-row .ep-count { font-family: var(--mono); font-weight: 700; }
+
 .hd-notes-label { font-size: 12px; color: var(--muted); text-transform: uppercase;
   letter-spacing: .6px; margin: 16px 0 4px; }
 
@@ -341,3 +364,93 @@ table { width: 100%; border-collapse: collapse; }
   background: var(--bg-3); border: 1px solid var(--line); color: var(--text);
   padding: 10px 16px; border-radius: 24px; z-index: 60; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
 .toast.err { border-color: var(--red); color: #ffd7d7; }
+
+/* ---------------- Nessus findings ---------------- */
+.sev-summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.sev-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px;
+  border: 1px solid transparent; }
+.findings-info-toggle { margin: 2px 0 8px; }
+
+/* severity palette: Critical, High, Medium, Low, Info */
+.sev-4 { color: #d17be0; }
+.sev-3 { color: var(--red); }
+.sev-2 { color: var(--amber); }
+.sev-1 { color: var(--accent); }
+.sev-0 { color: var(--muted); }
+.sev-badge.sev-4 { background: rgba(209,123,224,.16); border-color: rgba(209,123,224,.35); }
+.sev-badge.sev-3 { background: rgba(224,91,91,.16);  border-color: rgba(224,91,91,.35); }
+.sev-badge.sev-2 { background: rgba(224,166,59,.16); border-color: rgba(224,166,59,.35); }
+.sev-badge.sev-1 { background: rgba(76,139,245,.16); border-color: rgba(76,139,245,.35); }
+.sev-badge.sev-0 { background: rgba(138,151,168,.14); border-color: rgba(138,151,168,.3); }
+
+.findings { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.finding { background: var(--bg-2); border: 1px solid var(--line); border-left-width: 3px;
+  border-radius: 7px; overflow: hidden; }
+.finding.sev-border-4 { border-left-color: #d17be0; }
+.finding.sev-border-3 { border-left-color: var(--red); }
+.finding.sev-border-2 { border-left-color: var(--amber); }
+.finding.sev-border-1 { border-left-color: var(--accent); }
+.finding.sev-border-0 { border-left-color: var(--line); }
+.finding > summary { list-style: none; cursor: pointer; padding: 8px 10px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.finding > summary::-webkit-details-marker { display: none; }
+.finding > summary:hover { background: var(--bg-3); }
+.sev-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,.05); }
+.finding-name { font-size: 13px; color: var(--text); flex: 1; min-width: 140px; }
+.finding-port { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.finding-cvss { font-size: 11px; color: var(--amber); font-weight: 600; }
+.finding-body { padding: 4px 12px 12px; border-top: 1px solid var(--line); }
+.finding-sec { margin-top: 8px; }
+.finding-sec-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); margin-bottom: 3px; }
+.finding-sec-text { font-size: 12.5px; color: var(--text); white-space: pre-wrap; line-height: 1.45; }
+.finding-body pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  padding: 8px 10px; font-size: 11.5px; overflow-x: auto; white-space: pre-wrap; }
+
+/* ---------------- Folders (scan organisation) ---------------- */
+.icon-btn { background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 13px; padding: 2px 5px; border-radius: 6px; line-height: 1; }
+.icon-btn:hover { background: var(--bg-3); color: var(--text); }
+.tag-nessus { font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
+  background: rgba(209,123,224,.16); color: #d17be0; padding: 1px 6px;
+  border-radius: 10px; flex: 0 0 auto; }
+.empty-scans { padding: 12px 6px; font-size: 12px; }
+
+.folder-group { margin-bottom: 3px; }
+.folder-head { display: flex; align-items: center; gap: 6px; cursor: pointer;
+  padding: 6px 8px; border-radius: var(--radius); border: 1px solid transparent;
+  color: var(--muted); font-size: 12px; user-select: none; }
+.folder-head:hover { background: var(--bg-2); color: var(--text); }
+.folder-head.drop-hover { background: rgba(76,139,245,.18); border-color: var(--accent);
+  color: var(--text); }
+.folder-caret { width: 12px; flex: 0 0 auto; font-size: 10px; }
+.folder-name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; letter-spacing: .2px; }
+.folder-head.unfiled .folder-name { font-weight: 500; font-style: italic; }
+.folder-count { flex: 0 0 auto; font-size: 11px; color: var(--muted);
+  background: var(--bg-3); border-radius: 10px; padding: 0 7px; min-width: 18px; text-align: center; }
+.folder-menu-wrap { flex: 0 0 auto; }
+/* Anchored at the far-right ⋯ button, open leftward so the labels stay inside
+   the sidebar (left:0 would overflow and get clipped by the scroll container). */
+.folder-menu-wrap .menu-list { left: auto; right: 0; min-width: 190px; z-index: 60; }
+.folder-scans { padding-left: 12px; margin: 2px 0 4px; border-left: 1px solid var(--line); }
+.folder-empty { padding: 8px 10px; font-size: 11.5px; font-style: italic; }
+.scan-item.dragging { opacity: .45; }
+.scan-item[draggable="true"] { cursor: grab; }
+.folder-select { width: 14px; height: 14px; flex: 0 0 auto; cursor: pointer; accent-color: var(--accent); }
+.folder-select:disabled { opacity: .4; cursor: default; }
+
+/* ---------------- Port state disagreement (merge) ---------------- */
+.port-disagree { margin: 6px 0; padding: 8px 10px; border-radius: 7px;
+  background: rgba(224,166,59,.08); border: 1px solid rgba(224,166,59,.35); }
+.pd-title { font-size: 11px; font-weight: 700; color: var(--amber);
+  text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+.pd-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+.pd-row .pill { flex: 0 0 auto; min-width: 62px; text-align: center; }
+.pd-scans { font-size: 12px; color: var(--text); }
+
+/* Nessus findings attached to a specific port row */
+.port-findings { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.pf-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  color: #d17be0; font-weight: 700; }

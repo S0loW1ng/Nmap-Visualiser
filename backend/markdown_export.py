@@ -145,6 +145,21 @@ def to_report(scan: dict, ports_only_open: bool = False) -> str:
         else:
             out.append("_No open ports._\n")
 
+        findings = host.get("findings", [])
+        if findings:
+            sev_labels = {0: "Info", 1: "Low", 2: "Medium", 3: "High", 4: "Critical"}
+            out.append("**Nessus findings**\n")
+            out.append("| Severity | Finding | Port | CVSS | CVE |")
+            out.append("| --- | --- | --- | --- | --- |")
+            for f in findings:
+                port = f"{f.get('port')}/{f.get('protocol','')}" if f.get("port") else "—"
+                cve = ", ".join(f.get("cve") or [])
+                out.append(
+                    f"| {sev_labels.get(f.get('severity', 0), 'Info')} "
+                    f"| {_esc(f.get('name'))} | {port} | {_esc(f.get('cvss'))} | {_esc(cve)} |"
+                )
+            out.append("")
+
         if host.get("notes"):
             out.append("**Notes**\n")
             out.append("> " + host["notes"].strip().replace("\n", "\n> ") + "\n")

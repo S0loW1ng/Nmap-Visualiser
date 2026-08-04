@@ -9,7 +9,10 @@ const state = {
   hostId: null,      // selected host id
   sort: { key: "ip", dir: 1 },
   filter: "",
-  openOnly: false,
+  flaggedOnly: false,
+  portStates: { open: true, filtered: true, closed: true, openfiltered: true },
+  folders: [],          // folders for organising scans
+  folderOpen: {},       // folder id (or "unfiled") -> open? (persisted)
   selected: new Set(),  // scan ids ticked for merge
   shots: [],            // screenshots for the current scan
   ewStatus: null,       // last EyeWitness status
@@ -144,46 +147,283 @@ function ipKey(ip) {
 // ---------------------------------------------------------------------------
 // Sidebar / scan list
 // ---------------------------------------------------------------------------
+let draggingId = null;         // scan id currently being dragged (folder DnD)
+let pendingImportFolder = null; // folder id to drop the next import into (or null)
+
+function loadFolderOpen() {
+  try { state.folderOpen = JSON.parse(localStorage.getItem("nv_folderOpen") || "{}"); }
+  catch (_) { state.folderOpen = {}; }
+}
+function saveFolderOpen() {
+  try { localStorage.setItem("nv_folderOpen", JSON.stringify(state.folderOpen)); } catch (_) {}
+}
+
 async function loadScans(selectId = null) {
-  state.scans = await api("/api/scans");
+  [state.scans, state.folders] = await Promise.all([
+    api("/api/scans"),
+    api("/api/folders").catch(() => []),
+  ]);
   // drop selections for scans that no longer exist
   const ids = new Set(state.scans.map((s) => s.id));
   for (const id of [...state.selected]) if (!ids.has(id)) state.selected.delete(id);
 
-  const list = $("#scanList");
-  list.innerHTML = "";
-  for (const s of state.scans) {
-    const li = el("li", "scan-item");
-    li.dataset.id = s.id;
-    if (state.scan && state.scan.id === s.id) li.classList.add("active");
-
-    // merge-select checkbox
-    const sel = el("input", "si-select");
-    sel.type = "checkbox";
-    sel.checked = state.selected.has(s.id);
-    sel.title = "Select for merge";
-    sel.addEventListener("click", (e) => e.stopPropagation());
-    sel.addEventListener("change", () => {
-      if (sel.checked) state.selected.add(s.id);
-      else state.selected.delete(s.id);
-      updateMergeUI();
-    });
-    li.append(sel);
-
-    const body = el("div", "si-body");
-    const name = el("div", "si-name");
-    name.append(el("span", null, s.name));
-    if (s.source_type === "merged") name.append(el("span", "tag-merged", "merged"));
-    body.append(name);
-    body.append(el("div", "si-sub",
-      `${s.host_count} host${s.host_count === 1 ? "" : "s"} · ${s.open_port_count} open · ${s.source_type}`));
-    body.onclick = () => openScan(s.id);
-    li.append(body);
-
-    list.append(li);
-  }
+  renderScanList();
   updateMergeUI();
   if (selectId) openScan(selectId);
+}
+
+function scanItemEl(s) {
+  const li = el("li", "scan-item");
+  li.dataset.id = s.id;
+  li.draggable = true;
+  if (state.scan && state.scan.id === s.id) li.classList.add("active");
+
+  li.addEventListener("dragstart", (e) => {
+    draggingId = s.id;
+    e.dataTransfer.effectAllowed = "move";
+    try { e.dataTransfer.setData("text/plain", String(s.id)); } catch (_) {}
+    li.classList.add("dragging");
+  });
+  li.addEventListener("dragend", () => { draggingId = null; li.classList.remove("dragging"); });
+
+  // merge-select checkbox
+  const sel = el("input", "si-select");
+  sel.type = "checkbox";
+  sel.checked = state.selected.has(s.id);
+  sel.title = "Select (merge / move / delete)";
+  sel.addEventListener("click", (e) => e.stopPropagation());
+  sel.addEventListener("change", () => {
+    if (sel.checked) state.selected.add(s.id);
+    else state.selected.delete(s.id);
+    updateMergeUI();
+  });
+  li.append(sel);
+
+  const body = el("div", "si-body");
+  const name = el("div", "si-name");
+  name.append(el("span", null, s.name));
+  if (s.source_type === "merged") name.append(el("span", "tag-merged", "merged"));
+  if (s.source_type === "nessus") name.append(el("span", "tag-nessus", "nessus"));
+  body.append(name);
+  body.append(el("div", "si-sub",
+    `${s.host_count} host${s.host_count === 1 ? "" : "s"} · ${s.open_port_count} open · ${s.source_type}`));
+  body.onclick = () => openScan(s.id);
+  li.append(body);
+  return li;
+}
+
+// make a header act as a drop target that moves the dragged scan(s) into folderId
+function wireDrop(elm, folderId) {
+  elm.addEventListener("dragover", (e) => {
+    if (draggingId == null) return;
+    e.preventDefault();
+    elm.classList.add("drop-hover");
+  });
+  elm.addEventListener("dragleave", () => elm.classList.remove("drop-hover"));
+  elm.addEventListener("drop", (e) => {
+    e.preventDefault();
+    elm.classList.remove("drop-hover");
+    if (draggingId == null) return;
+    const ids = state.selected.has(draggingId) ? [...state.selected] : [draggingId];
+    moveScans(ids, folderId);
+  });
+}
+
+// header checkbox that selects/deselects every scan in a group
+function folderSelectCb(scans) {
+  const cb = el("input", "folder-select");
+  cb.type = "checkbox";
+  const ids = scans.map((s) => s.id);
+  const selCount = ids.filter((id) => state.selected.has(id)).length;
+  cb.checked = ids.length > 0 && selCount === ids.length;
+  cb.indeterminate = selCount > 0 && selCount < ids.length;
+  cb.disabled = ids.length === 0;
+  cb.title = "Select all scans in this folder";
+  cb.addEventListener("click", (e) => e.stopPropagation());
+  cb.addEventListener("change", () => {
+    if (cb.checked) ids.forEach((id) => state.selected.add(id));
+    else ids.forEach((id) => state.selected.delete(id));
+    renderScanList();
+    updateMergeUI();
+  });
+  return cb;
+}
+
+function folderGroupEl(f, scans) {
+  const open = state.folderOpen[f.id] !== false;
+  const group = el("div", "folder-group");
+  const head = el("div", "folder-head");
+  head.append(folderSelectCb(scans));
+  head.append(el("span", "folder-caret", open ? "▾" : "▸"));
+  head.append(el("span", "folder-name", f.name));
+  head.append(el("span", "folder-count", String(scans.length)));
+
+  // rename / delete menu
+  const menu = el("div", "menu folder-menu-wrap");
+  const menuBtn = el("button", "icon-btn", "⋯");
+  menuBtn.title = "Rename or delete folder";
+  const list = el("div", "menu-list"); list.hidden = true;
+  const imp = el("button", "menu-item", "⤓ Import scan(s) here");
+  imp.onclick = (e) => {
+    e.stopPropagation(); list.hidden = true;
+    pendingImportFolder = f.id;
+    state.folderOpen[f.id] = true; saveFolderOpen();
+    $("#fileInput").value = "";      // allow re-selecting the same file
+    $("#fileInput").click();
+  };
+  const rn = el("button", "menu-item", "✎ Rename");
+  rn.onclick = (e) => { e.stopPropagation(); list.hidden = true; renameFolder(f); };
+  const del = el("button", "menu-item danger", "🗑 Delete folder");
+  del.onclick = (e) => { e.stopPropagation(); list.hidden = true; deleteFolder(f); };
+  list.append(imp, rn, del);
+  menuBtn.onclick = (e) => { e.stopPropagation(); const o = !list.hidden; closeAllMenus(); list.hidden = o; };
+  menu.append(menuBtn, list);
+  head.append(menu);
+
+  head.onclick = () => { state.folderOpen[f.id] = !open; saveFolderOpen(); renderScanList(); };
+  wireDrop(head, f.id);
+  group.append(head);
+
+  if (open) {
+    const bodyEl = el("div", "folder-scans");
+    for (const s of scans) bodyEl.append(scanItemEl(s));
+    if (!scans.length) bodyEl.append(el("div", "muted folder-empty", "Empty — drop scans here"));
+    group.append(bodyEl);
+  }
+  return group;
+}
+
+function unfiledGroupEl(scans) {
+  const key = "unfiled";
+  const open = state.folderOpen[key] !== false;
+  const group = el("div", "folder-group");
+  const head = el("div", "folder-head unfiled");
+  head.append(folderSelectCb(scans));
+  head.append(el("span", "folder-caret", open ? "▾" : "▸"));
+  head.append(el("span", "folder-name", "Unfiled"));
+  head.append(el("span", "folder-count", String(scans.length)));
+  head.onclick = () => { state.folderOpen[key] = !open; saveFolderOpen(); renderScanList(); };
+  wireDrop(head, null);
+  group.append(head);
+  if (open) {
+    const bodyEl = el("div", "folder-scans");
+    for (const s of scans) bodyEl.append(scanItemEl(s));
+    if (!scans.length) bodyEl.append(el("div", "muted folder-empty", "Nothing here"));
+    group.append(bodyEl);
+  }
+  return group;
+}
+
+function renderScanList() {
+  const container = $("#scanList");
+  container.innerHTML = "";
+  if (!state.scans.length) {
+    container.append(el("div", "muted empty-scans", "No scans yet."));
+    return;
+  }
+  const byFolder = new Map();
+  const unfiled = [];
+  for (const s of state.scans) {
+    if (s.folder_id) {
+      if (!byFolder.has(s.folder_id)) byFolder.set(s.folder_id, []);
+      byFolder.get(s.folder_id).push(s);
+    } else {
+      unfiled.push(s);
+    }
+  }
+  // With no folders defined, keep the classic flat list.
+  if (!state.folders.length) {
+    for (const s of unfiled) container.append(scanItemEl(s));
+    return;
+  }
+  for (const f of state.folders) container.append(folderGroupEl(f, byFolder.get(f.id) || []));
+  container.append(unfiledGroupEl(unfiled));
+}
+
+// ---------------------------------------------------------------------------
+// Folder actions
+// ---------------------------------------------------------------------------
+async function createFolderPrompt() {
+  const name = prompt("New folder name:");
+  if (name === null) return null;
+  const nn = name.trim();
+  if (!nn) return null;
+  try {
+    const f = await api("/api/folders", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: nn }),
+    });
+    state.folderOpen[f.id] = true; saveFolderOpen();
+    await loadScans(state.scan ? state.scan.id : null);
+    toast(`Folder "${f.name}" created`);
+    return f.id;
+  } catch (e) { toast("Could not create folder: " + e.message, true); return null; }
+}
+
+async function renameFolder(f) {
+  const name = prompt("Rename folder:", f.name);
+  if (name === null) return;
+  const nn = name.trim();
+  if (!nn || nn === f.name) return;
+  try {
+    await api(`/api/folders/${f.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: nn }),
+    });
+    await loadScans(state.scan ? state.scan.id : null);
+    toast("Folder renamed");
+  } catch (e) { toast("Rename failed: " + e.message, true); }
+}
+
+async function deleteFolder(f) {
+  if (!confirm(`Delete folder "${f.name}"?\nScans inside move to Unfiled — they are NOT deleted.`)) return;
+  try {
+    await api(`/api/folders/${f.id}`, { method: "DELETE" });
+    await loadScans(state.scan ? state.scan.id : null);
+    toast(`Folder "${f.name}" deleted`);
+  } catch (e) { toast("Delete failed: " + e.message, true); }
+}
+
+async function moveScans(ids, folderId) {
+  if (!ids.length) return;
+  try {
+    const r = await api("/api/scans/move", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids, folder_id: folderId }),
+    });
+    state.selected.clear();
+    await loadScans(state.scan ? state.scan.id : null);
+    const dest = folderId
+      ? (state.folders.find((x) => x.id === folderId) || {}).name || "folder"
+      : "Unfiled";
+    toast(`Moved ${r.moved} scan(s) → ${dest}`);
+  } catch (e) { toast("Move failed: " + e.message, true); }
+}
+
+function moveSelected(folderId) {
+  const ids = [...state.selected];
+  if (!ids.length) { toast("Select scans first", true); return; }
+  moveScans(ids, folderId);
+}
+
+function renderMoveMenu() {
+  const menu = $("#moveMenu");
+  menu.innerHTML = "";
+  const mk = (label, folderId) => {
+    const b = el("button", "menu-item", label);
+    b.onclick = () => { closeAllMenus(); moveSelected(folderId); };
+    return b;
+  };
+  for (const f of state.folders) menu.append(mk("📁 " + f.name, f.id));
+  menu.append(mk("○ Unfiled (no folder)", null));
+  const nf = el("button", "menu-item", "＋ New folder…");
+  nf.onclick = async () => {
+    closeAllMenus();
+    const sel = [...state.selected];
+    const id = await createFolderPrompt();
+    if (id && sel.length) moveScans(sel, id);
+  };
+  menu.append(nf);
 }
 
 function updateMergeUI() {
@@ -221,10 +461,12 @@ function setupMenus() {
 function closeAllMenus() { $$(".menu-list").forEach((l) => (l.hidden = true)); }
 
 async function importAndMerge(fileList) {
+  const folderId = pendingImportFolder; pendingImportFolder = null;
   const files = [...fileList];
   if (!files.length) return;
   const fd = new FormData();
   for (const f of files) fd.append("files", f);
+  if (folderId != null) fd.append("folder_id", folderId);
   try {
     const r = await api("/api/scans/import-merge", { method: "POST", body: fd });
     await loadScans(r.id);
@@ -294,10 +536,12 @@ async function clearDatabase() {
 // Import
 // ---------------------------------------------------------------------------
 async function importFiles(fileList) {
+  const folderId = pendingImportFolder; pendingImportFolder = null;
   let lastId = null;
   for (const file of fileList) {
     const fd = new FormData();
     fd.append("file", file);
+    if (folderId != null) fd.append("folder_id", folderId);
     try {
       const r = await api("/api/scans/import", { method: "POST", body: fd });
       lastId = r.id;
@@ -488,11 +732,62 @@ function openPortCount(h) {
   return h.ports.filter((p) => p.state === "open").length;
 }
 
+function portVisible(p) {
+  // Only the exact state nmap reported controls visibility — never inferred.
+  const st = (p.state || "").toLowerCase();
+  if (st === "open") return state.portStates.open;
+  if (st === "closed") return state.portStates.closed;
+  if (st === "filtered") return state.portStates.filtered;
+  if (st === "open|filtered") return state.portStates.openfiltered;
+  return true; // any other state shown as-is, not assumed
+}
+
+function extraVisible(ep) {
+  if (!ep.count) return false;
+  const st = (ep.state || "").toLowerCase();
+  if (st === "open") return state.portStates.open;
+  if (st === "closed") return state.portStates.closed;
+  if (st === "filtered") return state.portStates.filtered;
+  return true;
+}
+
+// a host is shown when it has at least one port or extraports bucket in an enabled state
+function hostHasVisiblePorts(h) {
+  const ps = state.portStates;
+  if (ps.open && ps.filtered && ps.closed && ps.openfiltered) return true; // all on → no filtering
+  for (const p of h.ports) if (portVisible(p)) return true;
+  for (const ep of (h.extraports || [])) if (extraVisible(ep)) return true;
+  return false;
+}
+
+// counts of each state for a host (individual ports + extraports buckets)
+function stateCounts(h) {
+  // Count only exact states nmap reported. Ambiguous states like "open|filtered"
+  // are NOT counted as open/closed/filtered — we do not assume.
+  const c = { open: 0, closed: 0, filtered: 0, openfiltered: 0 };
+  for (const p of h.ports) {
+    const st = (p.state || "").toLowerCase();
+    if (st === "open") c.open += 1;
+    else if (st === "closed") c.closed += 1;
+    else if (st === "filtered") c.filtered += 1;
+    else if (st === "open|filtered") c.openfiltered += 1;
+  }
+  for (const ep of (h.extraports || [])) {
+    const st = (ep.state || "").toLowerCase();
+    if (st === "open") c.open += ep.count || 0;
+    else if (st === "closed") c.closed += ep.count || 0;
+    else if (st === "filtered") c.filtered += ep.count || 0;
+    else if (st === "open|filtered") c.openfiltered += ep.count || 0;
+  }
+  return c;
+}
+
 function renderHostTable() {
   const body = $("#hostTableBody");
   body.innerHTML = "";
   let hosts = state.scan.hosts.filter(hostMatchesFilter);
-  if (state.openOnly) hosts = hosts.filter((h) => openPortCount(h) > 0);
+  if (state.flaggedOnly) hosts = hosts.filter((h) => h.flagged);
+  hosts = hosts.filter(hostHasVisiblePorts);
 
   const { key, dir } = state.sort;
   hosts.sort((a, b) => {
@@ -500,9 +795,13 @@ function renderHostTable() {
     switch (key) {
       case "hostname": va = a.hostname || ""; vb = b.hostname || ""; break;
       case "state": va = a.state || ""; vb = b.state || ""; break;
-      case "open": va = openPortCount(a); vb = openPortCount(b); break;
+      case "open": va = stateCounts(a).open; vb = stateCounts(b).open; break;
+      case "closed": va = stateCounts(a).closed; vb = stateCounts(b).closed; break;
+      case "filtered": va = stateCounts(a).filtered; vb = stateCounts(b).filtered; break;
+      case "openfiltered": va = stateCounts(a).openfiltered; vb = stateCounts(b).openfiltered; break;
       case "os": va = a.os_name || ""; vb = b.os_name || ""; break;
       case "checked": va = a.checked ? 1 : 0; vb = b.checked ? 1 : 0; break;
+      case "flagged": va = a.flagged ? 1 : 0; vb = b.flagged ? 1 : 0; break;
       default: va = ipKey(a.ip); vb = ipKey(b.ip);
     }
     if (va < vb) return -dir;
@@ -540,15 +839,48 @@ function renderHostTable() {
     cbTd.append(cb);
     tr.append(cbTd);
 
+    // flag-for-later toggle
+    if (h.flagged) tr.classList.add("flagged");
+    const flagTd = el("td", "flag-col");
+    const flag = el("button", "flag-btn" + (h.flagged ? " on" : ""), h.flagged ? "⚑" : "⚐");
+    flag.title = h.flagged ? "Flagged — click to unflag" : "Flag for later";
+    flag.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const val = !h.flagged;
+      try {
+        await api(`/api/hosts/${h.id}/flagged`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ flagged: val }),
+        });
+        h.flagged = val ? 1 : 0;
+        flag.textContent = val ? "⚑" : "⚐";
+        flag.classList.toggle("on", val);
+        flag.title = val ? "Flagged — click to unflag" : "Flag for later";
+        tr.classList.toggle("flagged", val);
+        if (state.flaggedOnly && !val) renderHostTable();
+      } catch (err) { toast("Could not save flag: " + err.message, true); }
+    });
+    flagTd.append(flag);
+    tr.append(flagTd);
+
     tr.append(tdHtml(`<span class="ip">${escapeHtml(h.ip)}</span>`));
     tr.append(el("td", null, h.hostname || "—"));
     const st = el("td");
     st.innerHTML = `<span class="state-${h.state === "up" ? "up" : "down"}">${escapeHtml(h.state || "?")}</span>`;
     tr.append(st);
-    const oc = openPortCount(h);
-    const td = el("td", "num");
-    td.innerHTML = `<span class="pill ${oc ? "pill-open" : "pill-zero"}">${oc}</span>`;
-    tr.append(td);
+    const c = stateCounts(h);
+    const openTd = el("td", "num");
+    openTd.innerHTML = `<span class="pill ${c.open ? "pill-open" : "pill-zero"}">${c.open}</span>`;
+    tr.append(openTd);
+    const closedTd = el("td", "num");
+    closedTd.innerHTML = c.closed ? `<span class="pill pill-closed">${c.closed}</span>` : `<span class="muted">—</span>`;
+    tr.append(closedTd);
+    const filteredTd = el("td", "num");
+    filteredTd.innerHTML = c.filtered ? `<span class="pill pill-filtered">${c.filtered}</span>` : `<span class="muted">—</span>`;
+    tr.append(filteredTd);
+    const ofTd = el("td", "num");
+    ofTd.innerHTML = c.openfiltered ? `<span class="pill pill-openfiltered">${c.openfiltered}</span>` : `<span class="muted">—</span>`;
+    tr.append(ofTd);
     tr.append(el("td", null, h.os_name || "—"));
     tr.onclick = () => { state.hostId = h.id; renderHostTable(); renderHostDetail(); };
     body.append(tr);
@@ -563,7 +895,7 @@ function renderHostTable() {
   if (!hosts.length) {
     const tr = el("tr");
     const td = el("td", "num");
-    td.colSpan = 6; td.style.textAlign = "center"; td.style.color = "var(--muted)";
+    td.colSpan = 10; td.style.textAlign = "center"; td.style.color = "var(--muted)";
     td.style.padding = "26px"; td.textContent = "No hosts match.";
     tr.append(td); body.append(tr);
   }
@@ -593,10 +925,12 @@ function renderHostDetail() {
   const m = el("div", "hd-meta"); m.innerHTML = meta.join(" &nbsp;·&nbsp; ");
   pane.append(m);
 
-  const openPorts = host.ports.filter((p) => p.state === "open");
-  const shown = state.openOnly ? openPorts : host.ports;
-  if (!shown.length) {
-    pane.append(el("div", "muted", "No ports to show."));
+  const shown = host.ports.filter(portVisible);
+  const visibleExtra = (host.extraports || []).filter(extraVisible);
+  if (!shown.length && !visibleExtra.length) {
+    const anyData = host.ports.length || (host.extraports || []).length;
+    pane.append(el("div", "muted",
+      anyData ? "No ports match the current state filter." : "No ports to show."));
   }
   for (const p of shown) {
     const row = el("div", "port-row");
@@ -685,10 +1019,15 @@ function renderHostDetail() {
     row.append(actions);
     row.append(noteWrap);
 
-    // --- script output ---
-    if (p.scripts && p.scripts.length) {
+    // --- port state disagreement (from a merge): compact per-file panel ---
+    const disagree = (p.scripts || []).find((s) => s.id === "port-state-disagreement");
+    if (disagree) row.append(portDisagreeEl(disagree.output));
+
+    // --- script output (excluding the structured disagreement marker) ---
+    const scripts = (p.scripts || []).filter((s) => s.id !== "port-state-disagreement");
+    if (scripts.length) {
       const sc = el("div", "scripts");
-      for (const s of p.scripts) {
+      for (const s of scripts) {
         const d = el("div", "script");
         d.innerHTML = `<span class="script-id">${escapeHtml(s.id)}</span>` +
           (s.output ? `<pre>${escapeHtml(s.output)}</pre>` : "");
@@ -696,8 +1035,36 @@ function renderHostDetail() {
       }
       row.append(sc);
     }
+
+    // --- Nessus findings that pertain to THIS port (matched by port/proto) ---
+    const pf = (host.findings || []).filter(
+      (f) => f.port === p.portid && (f.protocol || "tcp") === (p.protocol || "tcp"));
+    if (pf.length) {
+      const wrap = el("div", "port-findings");
+      const crit = pf.filter((f) => (f.severity || 0) >= 3).length;
+      const label = `Nessus — ${pf.length} finding${pf.length > 1 ? "s" : ""}` +
+        (crit ? ` (${crit} high/critical)` : "");
+      wrap.append(el("div", "pf-label", label));
+      for (const f of pf) wrap.append(findingEl(f));
+      row.append(wrap);
+    }
+
     pane.append(row);
   }
+
+  // extraports summary (nmap collapses closed/filtered ports into a count)
+  for (const ep of visibleExtra) {
+    const row = el("div", "extraports-row");
+    const cls = ep.state === "open" ? "up" : "down";
+    row.innerHTML =
+      `<span class="ep-count state-${cls}">${ep.count}</span> ` +
+      `${escapeHtml(ep.state)} port(s)` +
+      (ep.reason ? ` <span class="muted">(${escapeHtml(ep.reason)})</span>` : "");
+    pane.append(row);
+  }
+
+  // Nessus findings for this host (severity summary + collapsible detail)
+  if (host.findings && host.findings.length) renderFindings(pane, host.findings);
 
   // --- deeper scan: copy the command, or run it locally / on an agent ---
   pane.append(el("div", "hd-notes-label", "Deeper scan"));
@@ -773,6 +1140,113 @@ function renderHostDetail() {
 
 function versionStr(p) {
   return [p.product, p.version, p.extrainfo].filter(Boolean).join(" ").trim();
+}
+
+// Compact panel showing which merged file reported which state for a port,
+// rendered only when the files disagreed on the state.
+function portDisagreeEl(jsonStr) {
+  let prov;
+  try { prov = JSON.parse(jsonStr); } catch (_) { return el("span"); }
+  const box = el("div", "port-disagree");
+  box.append(el("div", "pd-title", "⚠ Files disagree on state"));
+  const pillClass = (state) => {
+    const st = (state || "").toLowerCase();
+    if (st === "open") return "pill-open";
+    if (st === "closed") return "pill-closed";
+    if (st === "filtered") return "pill-filtered";
+    if (st === "open|filtered") return "pill-openfiltered";
+    return "pill-zero";
+  };
+  for (const entry of prov) {
+    const r = el("div", "pd-row");
+    r.append(el("span", "pill " + pillClass(entry.state), entry.state));
+    r.append(el("span", "pd-scans", (entry.scans || []).join(", ")));
+    box.append(r);
+  }
+  return box;
+}
+
+// ---------------------------------------------------------------------------
+// Nessus findings (per host)
+// ---------------------------------------------------------------------------
+const SEV_LABELS = { 4: "Critical", 3: "High", 2: "Medium", 1: "Low", 0: "Info" };
+
+function renderFindings(pane, findings) {
+  pane.append(el("div", "hd-notes-label", "Nessus findings"));
+
+  // severity summary badges (Critical → Info)
+  const counts = { 4: 0, 3: 0, 2: 0, 1: 0, 0: 0 };
+  for (const f of findings) counts[f.severity || 0] = (counts[f.severity || 0] || 0) + 1;
+  const summary = el("div", "sev-summary");
+  for (const s of [4, 3, 2, 1, 0]) {
+    if (!counts[s]) continue;
+    summary.append(el("span", `sev-badge sev-${s}`, `${SEV_LABELS[s]} ${counts[s]}`));
+  }
+  pane.append(summary);
+
+  // "hide info" toggle — info findings are noisy; default to hidden if there are non-info ones
+  const hasReal = findings.some((f) => (f.severity || 0) > 0);
+  const list = el("div", "findings");
+  const draw = (showInfo) => {
+    list.innerHTML = "";
+    for (const f of findings) {
+      if (!showInfo && (f.severity || 0) === 0) continue;
+      list.append(findingEl(f));
+    }
+  };
+  if (counts[0] && hasReal) {
+    const toggle = el("label", "chk findings-info-toggle");
+    const cb = el("input"); cb.type = "checkbox";
+    toggle.append(cb, document.createTextNode(` show ${counts[0]} info finding(s)`));
+    cb.onchange = () => draw(cb.checked);
+    pane.append(toggle);
+    draw(false);
+  } else {
+    draw(true);
+  }
+  pane.append(list);
+}
+
+function findingEl(f) {
+  const sev = f.severity || 0;
+  const d = el("details", `finding sev-border-${sev}`);
+  const sum = el("summary");
+  sum.append(el("span", `sev-tag sev-${sev}`, SEV_LABELS[sev] || "Info"));
+  sum.append(el("span", "finding-name", f.name || "(unnamed)"));
+  if (f.port) sum.append(el("span", "finding-port", `${f.port}/${f.protocol || "tcp"}`));
+  if (f.cvss) sum.append(el("span", "finding-cvss", `CVSS ${f.cvss}`));
+  d.append(sum);
+
+  const body = el("div", "finding-body");
+  const addText = (label, val) => {
+    if (!val) return;
+    const sec = el("div", "finding-sec");
+    if (label) sec.append(el("div", "finding-sec-label", label));
+    sec.append(el("div", "finding-sec-text", val));
+    body.append(sec);
+  };
+  const addPre = (label, val) => {
+    if (!val) return;
+    const sec = el("div", "finding-sec");
+    sec.append(el("div", "finding-sec-label", label));
+    const pre = el("pre"); pre.textContent = val;
+    sec.append(pre);
+    body.append(sec);
+  };
+
+  const meta = [];
+  if (f.plugin_id) meta.push(`Plugin ${f.plugin_id}`);
+  if (f.family) meta.push(f.family);
+  if (f.risk_factor && f.risk_factor.toLowerCase() !== "none") meta.push(`Risk: ${f.risk_factor}`);
+  if ((f.cve || []).length) meta.push((f.cve || []).join(", "));
+  if ((f.sources || []).length) meta.push(`from: ${(f.sources || []).join(", ")}`);
+  addText("", meta.join("  ·  "));
+  addText("Synopsis", f.synopsis);
+  addText("Description", f.description);
+  addText("Solution", f.solution);
+  addPre("Output", f.output);
+  d.append(body);
+  return d;
 }
 
 function escapeHtml(s) {
@@ -944,7 +1418,14 @@ function renderAgentsList() {
 function init() {
   $("#fileInput").addEventListener("change", (e) => importFiles(e.target.files));
   $("#fileInput2").addEventListener("change", (e) => importFiles(e.target.files));
+  // Nessus: multiple files aggregate by IP into one scan (single file just imports).
+  $("#nessusInput").addEventListener("change", (e) => { importAndMerge(e.target.files); e.target.value = ""; });
   $("#importMergeInput").addEventListener("change", (e) => { importAndMerge(e.target.files); e.target.value = ""; });
+  // Top-level import targets Unfiled — clear any pending folder from a cancelled "Import here".
+  ["fileInput", "fileInput2", "nessusInput", "importMergeInput"].forEach((id) => {
+    const lbl = document.querySelector(`label[for="${id}"]`);
+    if (lbl) lbl.addEventListener("click", () => { pendingImportFolder = null; });
+  });
 
   // scan notes autosave
   const scanNotesSave = debounce(async () => {
@@ -1050,11 +1531,16 @@ function init() {
     } catch (e) { toast("Delete failed: " + e.message, true); }
   });
 
-  // filter + open-only + sorting
+  // filter + flagged-only + port-state toggles + sorting
   $("#hostFilter").addEventListener("input", (e) => { state.filter = e.target.value; renderHostTable(); });
-  $("#openOnly").addEventListener("change", (e) => {
-    state.openOnly = e.target.checked; renderHostTable(); renderHostDetail();
+  $("#flaggedOnly").addEventListener("change", (e) => { state.flaggedOnly = e.target.checked; renderHostTable(); });
+  const wirePortState = (id, key) => $(id).addEventListener("change", (e) => {
+    state.portStates[key] = e.target.checked; renderHostTable(); renderHostDetail();
   });
+  wirePortState("#stOpen", "open");
+  wirePortState("#stFiltered", "filtered");
+  wirePortState("#stOpenFiltered", "openfiltered");
+  wirePortState("#stClosed", "closed");
   $$("#hostTable thead th").forEach((th) => {
     th.addEventListener("click", () => {
       const key = th.dataset.sort;
@@ -1065,6 +1551,10 @@ function init() {
   });
 
   setupMenus();
+
+  // folders: create + move selected
+  $("#newFolderBtn").addEventListener("click", createFolderPrompt);
+  $("#moveBtn").addEventListener("click", renderMoveMenu);
 
   // merge all + bulk delete + select-all + clear database
   $("#mergeAllBtn").addEventListener("click", mergeAllScans);
@@ -1134,6 +1624,7 @@ function init() {
     } catch (e) { toast("Import failed: " + e.message, true); }
   });
 
+  loadFolderOpen();
   loadScans();
   loadAgents();
   loadJobs();

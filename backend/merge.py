@@ -17,9 +17,13 @@ can be handed straight to db.insert_scan().
 
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 
 _MERGE_SCRIPT_ID = "🔀 merge"
+# A recognisable, structured marker the frontend renders as a compact
+# "state disagreement" panel (output is JSON: [{"state", "scans": [...]}, ...]).
+_STATE_DISAGREE_ID = "port-state-disagreement"
 
 
 def _sig(port: dict) -> tuple:
@@ -78,6 +82,19 @@ def _merge_port(proto: str, portid: int, occurrences: list, ip_scans: list[str])
             found_in.append(sname)
     missing = [s for s in ip_scans if s not in found_in]
 
+    # per-file STATE provenance (first state each scan reported), grouped by state
+    state_by_scan: "OrderedDict[str, str]" = OrderedDict()
+    for sname, port in occurrences:
+        state_by_scan.setdefault(sname, (port.get("state", "") or "unknown"))
+    states: "OrderedDict[str, list[str]]" = OrderedDict()
+    for sname, st in state_by_scan.items():
+        states.setdefault(st, []).append(sname)
+    # only a disagreement when the reporting scans gave more than one distinct state
+    state_disagree = len(states) > 1
+    provenance = [{"state": st, "scans": names} for st, names in states.items()]
+    if state_disagree and missing:
+        provenance.append({"state": "not reported", "scans": missing})
+
     # provenance / mismatch note
     lines = [f"Found in: {', '.join(found_in)}."]
     if missing:
@@ -88,6 +105,10 @@ def _merge_port(proto: str, portid: int, occurrences: list, ip_scans: list[str])
             lines.append(f"  • {', '.join(snames)}: {_variant_desc(sig)}")
     note = "\n".join(lines)
 
+    out_scripts = scripts + [{"id": _MERGE_SCRIPT_ID, "output": note}]
+    if state_disagree:
+        out_scripts.append({"id": _STATE_DISAGREE_ID, "output": json.dumps(provenance)})
+
     return {
         "portid": portid,
         "protocol": proto,
@@ -97,7 +118,7 @@ def _merge_port(proto: str, portid: int, occurrences: list, ip_scans: list[str])
         "version": rep.get("version", ""),
         "extrainfo": rep.get("extrainfo", ""),
         "tunnel": rep.get("tunnel", ""),
-        "scripts": scripts + [{"id": _MERGE_SCRIPT_ID, "output": note}],
+        "scripts": out_scripts,
         "_mismatch": mismatch,
     }
 
@@ -120,6 +141,8 @@ def merge_scans(scans: list[dict], name: str) -> dict:
                 "scans": [],
                 "os_variants": [],       # list of (scan_name, os_name, accuracy)
                 "ports": OrderedDict(),   # (proto, portid) -> [(scan_name, port), ...]
+                "extra": {},              # state -> {"count": n, "reason": r} (max count wins)
+                "findings": OrderedDict(),  # (plugin_id, proto, port) -> [(scan_name, finding), ...]
             })
             if sname not in entry["scans"]:
                 entry["scans"].append(sname)
@@ -134,6 +157,15 @@ def merge_scans(scans: list[dict], name: str) -> dict:
             for p in h.get("ports", []):
                 key = (p.get("protocol", ""), int(p.get("portid", 0) or 0))
                 entry["ports"].setdefault(key, []).append((sname, p))
+            for ep in h.get("extraports", []):
+                st = ep.get("state", "")
+                cnt = int(ep.get("count", 0) or 0)
+                cur = entry["extra"].get(st)
+                if cur is None or cnt > cur["count"]:
+                    entry["extra"][st] = {"count": cnt, "reason": ep.get("reason", "")}
+            for f in h.get("findings", []):
+                fkey = (f.get("plugin_id", ""), f.get("protocol", ""), int(f.get("port", 0) or 0))
+                entry["findings"].setdefault(fkey, []).append((sname, f))
 
     merged_hosts = []
     for ip, entry in hosts_by_ip.items():
@@ -161,6 +193,26 @@ def merge_scans(scans: list[dict], name: str) -> dict:
             os_bits = "; ".join(f"{v[0]}={v[1]}" for v in entry["os_variants"])
             note_lines.append(f"OS differs across scans: {os_bits}")
 
+        extraports = [{"state": st, "count": v["count"], "reason": v["reason"]}
+                      for st, v in entry["extra"].items() if v["count"]]
+
+        # Findings: dedupe by (plugin, proto, port); keep the richest variant and
+        # record which scans reported it.
+        findings_out = []
+        for _fkey, occ in entry["findings"].items():
+            rep = max(occ, key=lambda it: (it[1].get("severity", 0),
+                                           len(it[1].get("description", "") or "")))[1]
+            srcs = []
+            for sname, _f in occ:
+                if sname not in srcs:
+                    srcs.append(sname)
+            merged_f = dict(rep)
+            merged_f["sources"] = srcs
+            findings_out.append(merged_f)
+        findings_out.sort(key=lambda f: (-f.get("severity", 0), (f.get("name") or "").lower()))
+        if findings_out:
+            note_lines.append(f"{len(findings_out)} Nessus finding(s) merged.")
+
         merged_hosts.append({
             "ip": ip,
             "hostname": entry["hostname"],
@@ -169,6 +221,8 @@ def merge_scans(scans: list[dict], name: str) -> dict:
             "os_accuracy": os_accuracy,
             "notes": "\n".join(note_lines),
             "ports": ports_out,
+            "extraports": extraports,
+            "findings": findings_out,
         })
 
     return {

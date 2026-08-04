@@ -10,6 +10,12 @@ data/
 # JSON backups / exports may contain client data
 nmap-viewer-backup-*.json
 
+# Raw scan files — contain real client/target data, never commit
+*.nessus
+*.gnmap
+*.nmap
+sample_scans/
+
 # Python virtual environment
 venv/
 .venv/
