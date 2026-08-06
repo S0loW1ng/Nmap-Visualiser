@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS agents (
     nmap_version TEXT DEFAULT '',
     tags         TEXT DEFAULT '',
     first_seen   TEXT,
-    last_seen    TEXT
+    last_seen    TEXT,
+    has_eyewitness INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -155,6 +156,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     scols = {row[1] for row in conn.execute("PRAGMA table_info(scans)").fetchall()}
     if "folder_id" not in scols:
         conn.execute("ALTER TABLE scans ADD COLUMN folder_id INTEGER")
+    acols = {row[1] for row in conn.execute("PRAGMA table_info(agents)").fetchall()}
+    if acols and "has_eyewitness" not in acols:
+        conn.execute("ALTER TABLE agents ADD COLUMN has_eyewitness INTEGER NOT NULL DEFAULT 0")
 
 
 # ---------------------------------------------------------------------------
@@ -625,22 +629,23 @@ def get_or_create_agent_token() -> str:
 # ---------------------------------------------------------------------------
 
 def upsert_agent(agent_uid: str, name: str, platform: str, nmap_version: str,
-                 tags: str = "") -> None:
+                 tags: str = "", has_eyewitness: bool = False) -> None:
     now = _now()
+    ew = 1 if has_eyewitness else 0
     with get_conn() as conn:
         exists = conn.execute("SELECT 1 FROM agents WHERE agent_uid = ?", (agent_uid,)).fetchone()
         if exists:
             conn.execute(
-                """UPDATE agents SET name=?, platform=?, nmap_version=?, tags=?, last_seen=?
-                   WHERE agent_uid=?""",
-                (name, platform, nmap_version, tags, now, agent_uid),
+                """UPDATE agents SET name=?, platform=?, nmap_version=?, tags=?,
+                                     has_eyewitness=?, last_seen=? WHERE agent_uid=?""",
+                (name, platform, nmap_version, tags, ew, now, agent_uid),
             )
         else:
             conn.execute(
                 """INSERT INTO agents (agent_uid, name, platform, nmap_version, tags,
-                                       first_seen, last_seen)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (agent_uid, name, platform, nmap_version, tags, now, now),
+                                       has_eyewitness, first_seen, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (agent_uid, name, platform, nmap_version, tags, ew, now, now),
             )
 
 

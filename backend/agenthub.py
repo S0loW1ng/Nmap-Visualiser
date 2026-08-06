@@ -12,11 +12,12 @@ to an agent are async and `await hub.dispatch(...)`.
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import datetime, timezone
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from backend import db, scanjobs
+from backend import db, eyewitness_runner, scanjobs
 
 
 def _now() -> str:
@@ -48,6 +49,12 @@ class AgentHub:
         await ws.send_json({"type": "stop", "job_id": job_id})
         return True
 
+    async def dispatch_eyewitness(self, agent_uid: str, ew_id: int, urls: list[str]) -> None:
+        ws = self._agents.get(agent_uid)
+        if ws is None:
+            raise RuntimeError("Agent is not connected.")
+        await ws.send_json({"type": "ew_run", "ew_id": ew_id, "urls": urls})
+
     # -- connection handler ---------------------------------------------
     async def handle(self, ws: WebSocket) -> None:
         token = ws.query_params.get("token", "")
@@ -64,7 +71,8 @@ class AgentHub:
                 return
             uid = reg["agent_uid"]
             db.upsert_agent(uid, reg.get("name", ""), reg.get("platform", ""),
-                            reg.get("nmap_version", ""), reg.get("tags", ""))
+                            reg.get("nmap_version", ""), reg.get("tags", ""),
+                            has_eyewitness=bool(reg.get("has_eyewitness", False)))
             self._agents[uid] = ws
             await ws.send_json({"type": "registered"})
 
@@ -101,6 +109,22 @@ class AgentHub:
             except Exception as exc:  # noqa: BLE001
                 db.update_job(jid, status="error",
                               error=f"Could not parse agent results: {exc}", finished_at=_now())
+        # -- EyeWitness (agent-run screenshots) --
+        elif t == "ew_started":
+            eyewitness_runner.agent_started(int(msg["ew_id"]), int(msg.get("total", 0)))
+        elif t == "ew_shot":
+            try:
+                data = base64.b64decode(msg.get("data_b64", ""))
+            except Exception:  # noqa: BLE001
+                data = b""
+            if data:
+                await asyncio.to_thread(eyewitness_runner.agent_shot,
+                                        int(msg["ew_id"]), msg.get("name", ""), data)
+        elif t == "ew_done":
+            await asyncio.to_thread(eyewitness_runner.agent_done, int(msg["ew_id"]))
+        elif t == "ew_error":
+            eyewitness_runner.agent_error(int(msg["ew_id"]), str(msg.get("error", "")),
+                                          str(msg.get("detail", "")))
 
 
 hub = AgentHub()

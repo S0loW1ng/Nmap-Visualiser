@@ -102,7 +102,10 @@
           <span id="scanSource" class="badge"></span>
           <div class="spacer"></div>
           <div class="export-group">
-            <button class="btn" id="eyewitnessBtn" title="Screenshot this scan's web services with EyeWitness">📷 EyeWitness</button>
+            <div class="menu" id="ewMenuWrap">
+              <button class="btn menu-toggle" id="eyewitnessBtn" title="Screenshot this scan's web services with EyeWitness">📷 EyeWitness <span class="caret">▾</span></button>
+              <div class="menu-list" hidden id="ewMenu"></div>
+            </div>
             <button class="btn" id="exportTableBtn">⤓ Table.md</button>
             <button class="btn" id="exportReportBtn">⤓ Report.md</button>
             <button class="btn btn-danger" id="deleteScanBtn">🗑 Delete</button>

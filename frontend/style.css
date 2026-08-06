@@ -190,8 +190,9 @@ code { font-family: var(--mono); font-size: 0.92em; color: #cbd5e1; }
 .save-hint { color: var(--green); font-size: 12px; margin-left: 4px; }
 
 /* ---------------- Split: hosts + detail ---------------- */
-.split { display: grid; grid-template-columns: 1fr 420px; gap: 16px; margin-top: 10px; }
-@media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
+/* Stacked: the IP list on top, the selected host's results full-width below it
+   so the results get the whole page width. */
+.split { display: flex; flex-direction: column; gap: 16px; margin-top: 10px; }
 
 .pane-toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
 .filter {
@@ -201,7 +202,7 @@ code { font-family: var(--mono); font-size: 0.92em; color: #cbd5e1; }
 .filter:focus { outline: none; border-color: var(--accent); }
 .chk { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 
-.table-wrap { border: 1px solid var(--line); border-radius: var(--radius); overflow: auto; max-height: 62vh; }
+.table-wrap { border: 1px solid var(--line); border-radius: var(--radius); overflow: auto; max-height: 46vh; }
 table { width: 100%; border-collapse: collapse; }
 .host-table th, .host-table td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); }
 .host-table thead th {
@@ -244,7 +245,7 @@ table { width: 100%; border-collapse: collapse; }
 
 /* ---------------- Host detail ---------------- */
 .host-detail { border: 1px solid var(--line); border-radius: var(--radius);
-  background: var(--bg-1); padding: 16px; max-height: 74vh; overflow-y: auto; }
+  background: var(--bg-1); padding: 20px 24px; }
 .host-detail-empty { color: var(--muted); text-align: center; padding: 40px 10px; }
 .hd-ip { font-family: var(--mono); font-size: 18px; font-weight: 700; }
 .hd-host { color: var(--muted); margin-left: 6px; font-size: 14px; }
@@ -454,3 +455,31 @@ table { width: 100%; border-collapse: collapse; }
 .port-findings { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .pf-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
   color: #d17be0; font-weight: 700; }
+
+/* EyeWitness run menu */
+.ew-hint { color: var(--muted); font-size: 12px; cursor: default; }
+.ew-hint:hover { background: transparent; }
+
+/* ---------------- Merge provenance (collapsed, colour-coded) ---------------- */
+.merge-notes { margin: 6px 0; background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 7px; overflow: hidden; }
+.merge-notes > summary { list-style: none; cursor: pointer; padding: 6px 10px;
+  font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.merge-notes > summary::-webkit-details-marker { display: none; }
+.merge-notes > summary::before { content: "▸"; font-size: 10px; color: var(--muted); }
+.merge-notes[open] > summary::before { content: "▾"; }
+.merge-notes > summary:hover { background: var(--bg-3); color: var(--text); }
+.mn-count { margin-left: auto; background: var(--bg-3); color: var(--muted);
+  border-radius: 10px; padding: 0 7px; font-size: 11px; }
+.mn-body { padding: 6px 10px 8px; border-top: 1px solid var(--line);
+  font-family: var(--mono); font-size: 11.5px; }
+.mn-block { padding: 4px 0; }
+.mn-block + .mn-block { border-top: 1px dashed var(--line); }
+.mn-line { white-space: pre-wrap; line-height: 1.5; color: var(--text); }
+.mn-found { color: var(--green); }
+.mn-missing { color: var(--red); }
+.mn-diff { color: var(--amber); }
+
+/* scan timestamps */
+.scan-times { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.si-time { font-size: 11px; opacity: .85; margin-top: 1px; }

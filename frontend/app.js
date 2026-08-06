@@ -137,6 +137,15 @@ function debounce(fn, ms) {
   return (...a) => { clearTimeout(h); h = setTimeout(() => fn(...a), ms); };
 }
 
+function fmtTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+}
+
 function ipKey(ip) {
   // sortable key for IPv4; falls back to string
   const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(ip || "");
@@ -207,6 +216,11 @@ function scanItemEl(s) {
   body.append(name);
   body.append(el("div", "si-sub",
     `${s.host_count} host${s.host_count === 1 ? "" : "s"} · ${s.open_port_count} open · ${s.source_type}`));
+  const when = s.started_at || s.imported_at;
+  if (when) {
+    const prefix = s.started_at ? "🕐 " : "⤓ ";
+    body.append(el("div", "si-sub si-time", prefix + fmtTime(when)));
+  }
   body.onclick = () => openScan(s.id);
   li.append(body);
   return li;
@@ -671,7 +685,47 @@ function stopEwPoll() {
 function setEwBtnBusy(busy) {
   const b = $("#eyewitnessBtn");
   b.disabled = busy;
-  b.textContent = busy ? "📷 Running…" : "📷 EyeWitness";
+  b.innerHTML = busy ? "📷 Running…" : '📷 EyeWitness <span class="caret">▾</span>';
+}
+
+// Populate the EyeWitness "Run locally / Run on <agent>" menu.
+function renderEwMenu() {
+  const menu = $("#ewMenu");
+  menu.innerHTML = "";
+  const mk = (label, agent) => {
+    const b = el("button", "menu-item", label);
+    b.onclick = () => { closeAllMenus(); startEyewitness(agent); };
+    return b;
+  };
+  menu.append(mk("▶ Run locally", "local"));
+  const ewAgents = (state.agents || []).filter((a) => a.online && a.has_eyewitness);
+  for (const a of ewAgents) menu.append(mk(`⛓ Run on ${a.name}`, a.agent_uid));
+  if (!ewAgents.length) {
+    const hint = el("div", "menu-item ew-hint", "No online agents have EyeWitness");
+    menu.append(hint);
+  }
+}
+
+async function startEyewitness(agent) {
+  if (!state.scan) return;
+  const sid = state.scan.id;
+  setEwBtnBusy(true);
+  $("#shotsBlock").hidden = false;
+  try {
+    const q = agent && agent !== "local" ? `?agent=${encodeURIComponent(agent)}` : "";
+    const st = await api(`/api/scans/${sid}/eyewitness${q}`, { method: "POST" });
+    state.ewStatus = st;
+    renderEwStatus();
+    if (st.state === "running") startEwPoll(sid);
+    else {
+      setEwBtnBusy(false);
+      await loadScreenshots(sid);
+      if (st.state === "error") toast(st.message || "EyeWitness error", true);
+    }
+  } catch (e) {
+    setEwBtnBusy(false);
+    toast("EyeWitness failed: " + e.message, true);
+  }
 }
 
 async function renameScanPrompt() {
@@ -706,7 +760,10 @@ function renderScanHeader() {
   meta.push(`${openPorts} open port(s)`);
   const parts = [`<span>${meta.join(" &nbsp;·&nbsp; ")}</span>`];
   if (s.args) parts.push(`<div class="cmd" title="${escapeHtml(s.args)}">Command: <code>${escapeHtml(s.args)}</code></div>`);
-  if (s.started_at) parts.push(`<div>Started: ${escapeHtml(s.started_at)}</div>`);
+  const times = [];
+  if (s.started_at) times.push(`🕐 Started: ${escapeHtml(fmtTime(s.started_at))}`);
+  if (s.imported_at) times.push(`Imported: ${escapeHtml(fmtTime(s.imported_at))}`);
+  if (times.length) parts.push(`<div class="scan-times">${times.join(" &nbsp;·&nbsp; ")}</div>`);
   $("#scanMeta").innerHTML = parts.join("");
 }
 
@@ -882,7 +939,7 @@ function renderHostTable() {
     ofTd.innerHTML = c.openfiltered ? `<span class="pill pill-openfiltered">${c.openfiltered}</span>` : `<span class="muted">—</span>`;
     tr.append(ofTd);
     tr.append(el("td", null, h.os_name || "—"));
-    tr.onclick = () => { state.hostId = h.id; renderHostTable(); renderHostDetail(); };
+    tr.onclick = () => selectHost(h.id);
     body.append(tr);
   }
 
@@ -902,6 +959,15 @@ function renderHostTable() {
 }
 
 function tdHtml(html) { const td = el("td"); td.innerHTML = html; return td; }
+
+// Select a host and bring its (now full-width, below-the-list) results into view.
+function selectHost(id) {
+  state.hostId = id;
+  renderHostTable();
+  renderHostDetail();
+  const d = $("#hostDetail");
+  if (d) d.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
 
 // ---------------------------------------------------------------------------
 // Host detail
@@ -1023,8 +1089,13 @@ function renderHostDetail() {
     const disagree = (p.scripts || []).find((s) => s.id === "port-state-disagreement");
     if (disagree) row.append(portDisagreeEl(disagree.output));
 
-    // --- script output (excluding the structured disagreement marker) ---
-    const scripts = (p.scripts || []).filter((s) => s.id !== "port-state-disagreement");
+    // --- merge provenance notes: fold into one collapsed section ---
+    const mergeNotes = (p.scripts || []).filter((s) => s.id === "🔀 merge");
+    if (mergeNotes.length) row.append(mergeNotesEl(mergeNotes));
+
+    // --- script output (excluding the structured markers handled above) ---
+    const scripts = (p.scripts || []).filter(
+      (s) => s.id !== "port-state-disagreement" && s.id !== "🔀 merge");
     if (scripts.length) {
       const sc = el("div", "scripts");
       for (const s of scripts) {
@@ -1140,6 +1211,33 @@ function renderHostDetail() {
 
 function versionStr(p) {
   return [p.product, p.version, p.extrainfo].filter(Boolean).join(" ").trim();
+}
+
+// Fold merge-provenance notes into one collapsed section; colour the
+// "Found in" lines green and "Not seen in" lines red.
+function mergeNotesEl(notes) {
+  const d = el("details", "merge-notes");
+  const sum = el("summary");
+  sum.innerHTML = `<span class="mn-ico">🔀</span> Merge provenance ` +
+    `<span class="mn-count">${notes.length}</span>`;
+  d.append(sum);
+  const body = el("div", "mn-body");
+  for (const n of notes) {
+    const block = el("div", "mn-block");
+    for (const raw of (n.output || "").split("\n")) {
+      const line = el("div", "mn-line");
+      const t = raw.trim();
+      if (t.startsWith("Found in:")) line.classList.add("mn-found");
+      else if (t.startsWith("Not seen in:")) line.classList.add("mn-missing");
+      else if (t.startsWith("Differs") || t.startsWith("•") || raw.startsWith("  "))
+        line.classList.add("mn-diff");
+      line.textContent = raw;
+      block.append(line);
+    }
+    body.append(block);
+  }
+  d.append(body);
+  return d;
 }
 
 // Compact panel showing which merged file reported which state for a port,
@@ -1479,24 +1577,8 @@ function init() {
     if (state.scan) window.location = `/api/scans/${state.scan.id}/export/report`;
   });
 
-  // EyeWitness
-  $("#eyewitnessBtn").addEventListener("click", async () => {
-    if (!state.scan) return;
-    const sid = state.scan.id;
-    setEwBtnBusy(true);
-    $("#shotsBlock").hidden = false;
-    try {
-      const st = await api(`/api/scans/${sid}/eyewitness`, { method: "POST" });
-      state.ewStatus = st;
-      renderEwStatus();
-      if (st.state === "running") startEwPoll(sid);
-      else { setEwBtnBusy(false); await loadScreenshots(sid);
-             if (st.state === "error") toast(st.message || "EyeWitness error", true); }
-    } catch (e) {
-      setEwBtnBusy(false);
-      toast("EyeWitness failed: " + e.message, true);
-    }
-  });
+  // EyeWitness — the toggle opens a "Run locally / Run on <agent>" menu
+  $("#eyewitnessBtn").addEventListener("click", renderEwMenu);
   // agents modal
   $("#agentsBtn").addEventListener("click", openAgentsModal);
   $("#agentsClose").addEventListener("click", () => { $("#agentsModal").hidden = true; stopAgentsPoll(); });

@@ -373,13 +373,33 @@ def eyewitness_available():
 
 
 @app.post("/api/scans/{scan_id}/eyewitness")
-def run_eyewitness(scan_id: int):
+async def run_eyewitness(scan_id: int, agent: str = "local"):
     if not db.get_scan(scan_id):
         raise HTTPException(404, "Scan not found.")
+
+    agent = (agent or "local").strip()
+    if agent == "local":
+        try:
+            return eyewitness_runner.start(scan_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc))
+
+    # Remote agent: dispatch the URL list; the agent streams screenshots back.
+    if not agenthub.hub.is_online(agent):
+        raise HTTPException(400, "That agent is not connected.")
     try:
-        return eyewitness_runner.start(scan_id)
+        targets = eyewitness_runner.prepare_agent_run(scan_id, agent)
     except ValueError as exc:
         raise HTTPException(404, str(exc))
+    if not targets:
+        eyewitness_runner.agent_no_targets(scan_id)
+        return eyewitness_runner.get_status(scan_id)
+    try:
+        await agenthub.hub.dispatch_eyewitness(agent, scan_id, [t["url"] for t in targets])
+    except Exception as exc:  # noqa: BLE001
+        eyewitness_runner.agent_error(scan_id, f"Could not dispatch to agent: {exc}")
+        raise HTTPException(502, f"Could not dispatch to agent: {exc}")
+    return eyewitness_runner.get_status(scan_id)
 
 
 @app.get("/api/scans/{scan_id}/eyewitness/status")

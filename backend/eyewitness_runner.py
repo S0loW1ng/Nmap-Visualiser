@@ -35,6 +35,8 @@ HTTPS_PORTS = {443, 8443, 8444, 9443, 10000}
 
 # In-memory run status: scan_id -> {...}
 _status: dict[int, dict] = {}
+# Targets for an in-flight *agent* run: scan_id -> [{ip, port, url}]
+_agent_targets: dict[int, list] = {}
 _lock = threading.Lock()
 
 
@@ -201,16 +203,7 @@ def _run(scan_id: int, targets: list[dict], ew: list[str]) -> None:
         screens_dir = outdir / "screens"
         pngs = sorted(screens_dir.glob("*.png")) if screens_dir.exists() else []
 
-        rows = []
-        for png in pngs:
-            t = _match_screenshot(png, targets)
-            rows.append({
-                "ip": t["ip"] if t else "",
-                "port": t["port"] if t else 0,
-                "url": t["url"] if t else "",
-                "filename": str(png.resolve()),
-            })
-        db.replace_screenshots(scan_id, rows)
+        _store_screenshots(scan_id, targets, pngs)
 
         if not pngs:
             tail = (proc.stdout or "")[-800:] + (proc.stderr or "")[-800:]
@@ -228,3 +221,92 @@ def _run(scan_id: int, targets: list[dict], ew: list[str]) -> None:
     except Exception as exc:  # noqa: BLE001
         _set_status(scan_id, state="error", message=f"EyeWitness failed: {exc}",
                     finished_at=_now())
+
+
+def _store_screenshots(scan_id: int, targets: list[dict], pngs: list[Path]) -> int:
+    """Map produced PNGs back to (ip, port) targets and persist them."""
+    rows = []
+    for png in pngs:
+        t = _match_screenshot(png, targets)
+        rows.append({
+            "ip": t["ip"] if t else "",
+            "port": t["port"] if t else 0,
+            "url": t["url"] if t else "",
+            "filename": str(png.resolve()),
+        })
+    db.replace_screenshots(scan_id, rows)
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Remote agent runs
+#
+# The server dispatches the URL list to an agent over the WebSocket; the agent
+# runs EyeWitness on its side and streams the PNGs back. These helpers own the
+# status + on-disk output for that flow (called from agenthub).
+# ---------------------------------------------------------------------------
+
+def prepare_agent_run(scan_id: int, agent_uid: str) -> list[dict]:
+    """Reset output, mark the run as dispatched, and return the web targets."""
+    scan = db.get_scan(scan_id)
+    if not scan:
+        raise ValueError("Scan not found.")
+    targets = build_targets(scan)
+
+    outdir = EW_OUTPUT_ROOT / str(scan_id)
+    shutil.rmtree(outdir, ignore_errors=True)
+    (outdir / "screens").mkdir(parents=True, exist_ok=True)
+
+    with _lock:
+        _agent_targets[scan_id] = targets
+    _set_status(scan_id, state="running", message="Dispatched to agent…",
+                total=len(targets), count=0, started_at=_now(), where="agent")
+    return targets
+
+
+def agent_no_targets(scan_id: int) -> None:
+    db.replace_screenshots(scan_id, [])
+    _set_status(scan_id, state="done", total=0, count=0,
+                message="No web services (http/https) found in this scan.",
+                finished_at=_now())
+
+
+def agent_started(scan_id: int, total: int) -> None:
+    _set_status(scan_id, message=f"Agent screenshotting {total} web service(s)…",
+                total=total)
+
+
+def agent_shot(scan_id: int, name: str, data: bytes) -> None:
+    """Persist one screenshot streamed back from an agent."""
+    screens = EW_OUTPUT_ROOT / str(scan_id) / "screens"
+    screens.mkdir(parents=True, exist_ok=True)
+    safe = os.path.basename(name or "").strip() or f"shot-{len(list(screens.glob('*.png'))) + 1}.png"
+    if not safe.lower().endswith(".png"):
+        safe += ".png"
+    (screens / safe).write_bytes(data)
+    with _lock:
+        cur = _status.get(scan_id, {})
+        cur["count"] = cur.get("count", 0) + 1
+
+
+def agent_done(scan_id: int) -> None:
+    with _lock:
+        targets = _agent_targets.pop(scan_id, [])
+    screens = EW_OUTPUT_ROOT / str(scan_id) / "screens"
+    pngs = sorted(screens.glob("*.png")) if screens.exists() else []
+    if not pngs:
+        _set_status(scan_id, state="error", count=0,
+                    message="Agent ran EyeWitness but returned no screenshots.",
+                    finished_at=_now())
+        return
+    n = _store_screenshots(scan_id, targets, pngs)
+    _set_status(scan_id, state="done", count=n,
+                message=f"Captured {n} screenshot(s) via agent.", finished_at=_now())
+
+
+def agent_error(scan_id: int, message: str, detail: str = "") -> None:
+    with _lock:
+        _agent_targets.pop(scan_id, None)
+    _set_status(scan_id, state="error",
+                message=message or "Agent EyeWitness error.",
+                detail=(detail or "").strip(), finished_at=_now())

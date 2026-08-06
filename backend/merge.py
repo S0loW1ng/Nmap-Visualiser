@@ -109,15 +109,23 @@ def _merge_port(proto: str, portid: int, occurrences: list, ip_scans: list[str])
     if state_disagree:
         out_scripts.append({"id": _STATE_DISAGREE_ID, "output": json.dumps(provenance)})
 
+    # Enrich field-by-field: take the richest (longest non-empty) value seen in
+    # ANY file so a detailed -sV XML is never dropped in favour of a barer gnmap.
+    def richest(field: str) -> str:
+        vals = [p.get(field, "") for _sn, p in occurrences if p.get(field)]
+        return max(vals, key=len) if vals else ""
+
+    any_open = any(p.get("state") == "open" for _sn, p in occurrences)
+
     return {
         "portid": portid,
         "protocol": proto,
-        "state": rep.get("state", ""),
-        "service": rep.get("service", ""),
-        "product": rep.get("product", ""),
-        "version": rep.get("version", ""),
-        "extrainfo": rep.get("extrainfo", ""),
-        "tunnel": rep.get("tunnel", ""),
+        "state": "open" if any_open else (rep.get("state", "") or ""),
+        "service": richest("service"),
+        "product": richest("product"),
+        "version": richest("version"),
+        "extrainfo": richest("extrainfo"),
+        "tunnel": richest("tunnel"),
         "scripts": out_scripts,
         "_mismatch": mismatch,
     }

@@ -16,11 +16,14 @@ Requires: python3, nmap on PATH, and the `websockets` package.
 
 import argparse
 import asyncio
+import base64
+import glob
 import json
 import os
 import pathlib
 import platform
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,6 +50,18 @@ def nmap_version():
         return out.splitlines()[0] if out else ""
     except Exception:
         return ""
+
+
+def find_eyewitness():
+    """Locate EyeWitness on the agent host: env override, then a binary on PATH."""
+    py = os.environ.get("EYEWITNESS_PYTHON")
+    script = os.environ.get("EYEWITNESS_SCRIPT")
+    if py and script and os.path.exists(py) and os.path.exists(script):
+        return [py, script]
+    binp = shutil.which("eyewitness")
+    if binp:
+        return [binp]
+    return None
 
 
 def agent_uid():
@@ -128,6 +143,58 @@ async def run_job(ws, job_id, target, flags):
     runner.proc = None
 
 
+async def run_eyewitness(ws, ew_id, urls):
+    """Run EyeWitness against a URL list and stream the PNGs back to the server."""
+    ew = find_eyewitness()
+    if not ew:
+        await ws.send(json.dumps({"type": "ew_error", "ew_id": ew_id,
+                                  "error": "EyeWitness not found on the agent host"}))
+        return
+    urls = [u for u in (urls or []) if u]
+    if not urls:
+        await ws.send(json.dumps({"type": "ew_done", "ew_id": ew_id, "count": 0}))
+        return
+
+    tmpdir = tempfile.mkdtemp(prefix="nmapviewer-ew-")
+    outdir = os.path.join(tmpdir, "out")
+    # EyeWitness recreates -d at startup, so keep the URL list OUTSIDE it.
+    urls_file = os.path.join(tmpdir, "urls.txt")
+    with open(urls_file, "w") as f:
+        f.write("\n".join(urls) + "\n")
+
+    await ws.send(json.dumps({"type": "ew_started", "ew_id": ew_id, "total": len(urls)}))
+    cmd = ew + ["--web", "-f", urls_file, "-d", outdir, "--no-prompt"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await proc.communicate()
+    except FileNotFoundError:
+        await ws.send(json.dumps({"type": "ew_error", "ew_id": ew_id,
+                                  "error": "could not launch EyeWitness on the agent"}))
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return
+
+    screens = os.path.join(outdir, "screens")
+    pngs = sorted(glob.glob(os.path.join(screens, "*.png"))) if os.path.isdir(screens) else []
+    for png in pngs:
+        try:
+            with open(png, "rb") as fh:
+                b64 = base64.b64encode(fh.read()).decode("ascii")
+        except Exception:
+            continue
+        await ws.send(json.dumps({"type": "ew_shot", "ew_id": ew_id,
+                                  "name": os.path.basename(png), "data_b64": b64}))
+
+    if not pngs:
+        tail = (out or b"").decode(errors="replace")[-800:]
+        await ws.send(json.dumps({"type": "ew_error", "ew_id": ew_id,
+                                  "error": "EyeWitness produced no screenshots (check chromium/chromedriver)",
+                                  "detail": tail}))
+    else:
+        await ws.send(json.dumps({"type": "ew_done", "ew_id": ew_id, "count": len(pngs)}))
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def _unlink(path):
     try:
         os.unlink(path)
@@ -163,7 +230,7 @@ async def main():
                 await ws.send(json.dumps({
                     "type": "register", "agent_uid": uid, "name": args.name,
                     "platform": platform.platform(), "nmap_version": nmap_version(),
-                    "tags": args.tags,
+                    "tags": args.tags, "has_eyewitness": find_eyewitness() is not None,
                 }))
                 print("[+] connected and registered")
                 hb = asyncio.create_task(heartbeat(ws))
@@ -173,6 +240,8 @@ async def main():
                         t = msg.get("type")
                         if t == "run":
                             asyncio.create_task(run_job(ws, msg["job_id"], msg["target"], msg.get("flags", "")))
+                        elif t == "ew_run":
+                            asyncio.create_task(run_eyewitness(ws, msg["ew_id"], msg.get("urls", [])))
                         elif t == "stop":
                             runner.stop = True
                             if runner.proc:

@@ -51,6 +51,17 @@ def _epoch_to_iso(value: str | None) -> str | None:
         return None
 
 
+def _gnmap_date_to_iso(value: str | None) -> str | None:
+    """Parse gnmap's 'Tue Aug  5 14:30:00 2025' header date into ISO 8601."""
+    if not value:
+        return None
+    text = re.sub(r"\s+", " ", value).strip()
+    try:
+        return datetime.strptime(text, "%a %b %d %H:%M:%S %Y").isoformat()
+    except ValueError:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # XML (-oX)
 # ---------------------------------------------------------------------------
@@ -386,6 +397,9 @@ def parse_gnmap(data: bytes | str) -> dict:
             v = re.search(r"Nmap\s+(\S+)\s+scan initiated", line)
             if v and not scan["scanner_version"]:
                 scan["scanner_version"] = v.group(1)
+            d = re.search(r"scan initiated\s+(.+?)\s+as:", line)
+            if d and not scan["started_at"]:
+                scan["started_at"] = _gnmap_date_to_iso(d.group(1))
             continue
 
         m = host_line_re.match(line)
